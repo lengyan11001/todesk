@@ -29,6 +29,7 @@ const activeTitle = document.getElementById("activeTitle");
 const activeMeta = document.getElementById("activeMeta");
 const controlTabBtn = document.getElementById("controlTabBtn");
 const wallTabBtn = document.getElementById("wallTabBtn");
+const stageBody = document.querySelector(".stage-body");
 const screenWorkspace = document.getElementById("screenWorkspace");
 const viewerWrap = document.getElementById("viewerWrap");
 const screenPlaceholder = document.getElementById("screenPlaceholder");
@@ -37,6 +38,17 @@ const screenWallGrid = document.getElementById("screenWallGrid");
 const screenWallEmpty = document.getElementById("screenWallEmpty");
 const wallSizeRange = document.getElementById("wallSizeRange");
 const wallSizeValue = document.getElementById("wallSizeValue");
+const wallControlWindow = document.getElementById("wallControlWindow");
+const wallControlTitle = document.getElementById("wallControlTitle");
+const wallControlMeta = document.getElementById("wallControlMeta");
+const wallControlViewer = document.getElementById("wallControlViewer");
+const wallControlCanvas = document.getElementById("wallControlCanvas");
+const wallControlCtx = wallControlCanvas.getContext("2d");
+const wallControlFullscreenBtn = document.getElementById("wallControlFullscreenBtn");
+const wallControlCloseBtn = document.getElementById("wallControlCloseBtn");
+const wallControlBackBtn = document.getElementById("wallControlBackBtn");
+const wallControlHomeBtn = document.getElementById("wallControlHomeBtn");
+const wallControlHomeSwipeBtn = document.getElementById("wallControlHomeSwipeBtn");
 const viewer = document.getElementById("viewer");
 const canvas = document.getElementById("screenCanvas");
 const ctx = canvas.getContext("2d");
@@ -80,6 +92,19 @@ let lastFrameTimestamp = 0;
 const previewFrameSerials = new Map();
 const previewFrameTimestamps = new Map();
 let wallRenderKey = "";
+let wallActiveDeviceId = "";
+let wallFrameSize = { width: 0, height: 0 };
+let wallInputReady = false;
+let wallFrameDrawSerial = 0;
+let wallLastFrameTimestamp = 0;
+let wallDragStart = null;
+let wallDragLast = null;
+let wallDragLastSentAt = 0;
+let wallDragMoved = false;
+let wallDragStartedRemote = false;
+let wallDragButton = "left";
+let wallPendingText = "";
+let wallPendingTextTimer = 0;
 let fileTransfers = [];
 
 function devicePlatform(device) {
@@ -206,7 +231,7 @@ function setUser(user) {
 
   closeSocket();
   devices = [];
-  clearMonitorSessions(false);
+  clearMonitorSessions(false, true);
   sessionId = "";
   activeDeviceId = "";
   closeScreen(false);
@@ -234,7 +259,7 @@ function connect() {
     ws.addEventListener("open", () => {
       if (socketGeneration !== wsGeneration) return;
       sessionId = "";
-      clearMonitorSessions(false);
+      clearMonitorSessions(false, true);
       setInputReady(false);
       ws.send(JSON.stringify({ type: "hello-controller", token: sessionToken }));
     });
@@ -299,11 +324,29 @@ function connect() {
       if (screenOpen) activeMeta.textContent = `控制已停止：${msg.reason || "ended"}`;
     }
     if (msg.type === "error") {
+      const errorDeviceId = String(msg.device?.id || msg.deviceId || "").toUpperCase();
+      if (errorDeviceId && pendingControlIntents.get(errorDeviceId) === "monitor") {
+        pendingControlIntents.delete(errorDeviceId);
+        renderScreenWall();
+        updateWallControlState();
+        return;
+      }
       if (screenOpen) activeMeta.textContent = errorText(msg);
       if (msg.error === "bad_session") {
-        sessionId = "";
-        setInputReady(false);
-        resumeActiveControl();
+        const badSessionId = String(msg.sessionId || "");
+        const badMonitorDeviceId = deviceIdByMonitorSession(badSessionId);
+        if (badMonitorDeviceId) {
+          monitorSessions.delete(badMonitorDeviceId);
+          setWallInputReady(false);
+          syncMonitorSessions();
+          updateWallControlState();
+          return;
+        }
+        if (!badSessionId || badSessionId === sessionId) {
+          sessionId = "";
+          setInputReady(false);
+          resumeActiveControl();
+        }
       }
     }
   });
@@ -428,16 +471,25 @@ function deviceIdByMonitorSession(targetSessionId) {
   return "";
 }
 
-function clearMonitorSessions(notifyRemote = true) {
+function clearMonitorSessions(notifyRemote = true, clearAllIntents = false) {
   if (notifyRemote && ws?.readyState === WebSocket.OPEN) {
     for (const monitorSessionId of monitorSessions.values()) {
       ws.send(JSON.stringify({ type: "stop-control", sessionId: monitorSessionId }));
     }
   }
   monitorSessions.clear();
-  pendingControlIntents.clear();
+  if (clearAllIntents) {
+    pendingControlIntents.clear();
+  } else {
+    for (const [deviceId, intent] of Array.from(pendingControlIntents)) {
+      if (intent === "monitor") pendingControlIntents.delete(deviceId);
+    }
+  }
   previewFrameSerials.clear();
   previewFrameTimestamps.clear();
+  wallFrameDrawSerial += 1;
+  wallFrameSize = { width: 0, height: 0 };
+  wallLastFrameTimestamp = 0;
 }
 
 function stopMonitorSession(deviceId) {
@@ -449,9 +501,14 @@ function stopMonitorSession(deviceId) {
   pendingControlIntents.delete(deviceId);
   previewFrameSerials.delete(deviceId);
   previewFrameTimestamps.delete(deviceId);
+  if (wallActiveDeviceId === deviceId) updateWallControlState();
 }
 
 function syncMonitorSessions() {
+  if (activeStageTab !== "wall") {
+    clearMonitorSessions(true);
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const wanted = new Set(monitoredDevices().filter(canMonitorDevice).map((device) => device.id));
   if (sessionId && activeDeviceId) {
@@ -464,6 +521,7 @@ function syncMonitorSessions() {
     monitorSessions.delete(deviceId);
     previewFrameSerials.delete(deviceId);
     previewFrameTimestamps.delete(deviceId);
+    if (wallActiveDeviceId === deviceId) updateWallControlState();
   }
 
   for (const deviceId of Array.from(pendingControlIntents.keys())) {
@@ -483,23 +541,26 @@ function syncMonitorSessions() {
 function renderScreenWall() {
   if (!screenWallGrid) return;
   const wallDevices = monitoredDevices();
-  const nextKey = wallDevices.map((device) => `${device.id}:${device.online ? 1 : 0}:${hasScreenPermission(device) ? 1 : 0}`).join("|");
+  const nextKey = wallDevices.map((device) => `${device.id}:${device.online ? 1 : 0}:${hasScreenPermission(device) ? 1 : 0}:${monitorSessions.has(device.id) ? 1 : 0}`).join("|");
   screenWallEmpty.classList.toggle("hidden", wallDevices.length > 0);
   if (nextKey === wallRenderKey) {
     updateWallSize();
+    syncMonitorSessions();
+    updateWallControlState();
     return;
   }
   wallRenderKey = nextKey;
   screenWallGrid.innerHTML = "";
   for (const device of wallDevices) {
     const online = canMonitorDevice(device);
+    const connected = monitorSessions.has(device.id);
     const tile = document.createElement("article");
     tile.className = `wall-tile ${online ? "" : "offline"}`;
     tile.style.setProperty("--tile-width", `${Number(wallSizeRange.value || 280)}px`);
     tile.innerHTML = `
       <header>
         <strong>${escapeHtml(deviceName(device))}</strong>
-        <span>${escapeHtml(device.id)} · ${online ? "监控中" : (device.online ? "屏幕未开" : "离线")}</span>
+        <span>${escapeHtml(device.id)} · ${online ? (connected ? "监控中" : "连接中") : (device.online ? "屏幕未开" : "离线")}</span>
       </header>
       <div class="wall-screen">
         <canvas data-wall-device="${escapeAttr(device.id)}"></canvas>
@@ -507,21 +568,128 @@ function renderScreenWall() {
       </div>
       <footer>
         <button type="button" data-open-device="${escapeAttr(device.id)}">放大操作</button>
+        <button type="button" data-fullscreen-device="${escapeAttr(device.id)}">全屏播放</button>
       </footer>
     `;
-    tile.querySelector("[data-open-device]").addEventListener("click", () => {
-      setStageTab("control");
-      startControl(device.id);
-    });
+    tile.querySelector("[data-open-device]").addEventListener("click", () => openWallControl(device.id));
+    tile.querySelector("[data-fullscreen-device]").addEventListener("click", () => toggleWallTileFullscreen(tile));
     screenWallGrid.appendChild(tile);
   }
   syncMonitorSessions();
+  updateWallControlState();
 }
 
 function updateWallSize() {
   const size = Number(wallSizeRange.value || 280);
   wallSizeValue.textContent = `${size}px`;
   screenWallGrid.style.setProperty("--tile-width", `${size}px`);
+}
+
+function activeWallSessionId() {
+  if (!wallActiveDeviceId) return "";
+  return monitorSessions.get(wallActiveDeviceId) || (screenOpen && activeDeviceId === wallActiveDeviceId ? sessionId : "");
+}
+
+function setWallInputReady(enabled) {
+  wallInputReady = Boolean(enabled);
+  wallControlBackBtn.disabled = !wallInputReady;
+  wallControlHomeBtn.disabled = !wallInputReady;
+  wallControlHomeSwipeBtn.disabled = !wallInputReady;
+}
+
+function isWallControlOpen() {
+  return Boolean(wallActiveDeviceId && !wallControlWindow.classList.contains("hidden"));
+}
+
+function updateWallControlState() {
+  if (!isWallControlOpen()) return;
+  const device = devices.find((item) => item.id === wallActiveDeviceId);
+  if (!device) {
+    closeWallControl();
+    return;
+  }
+  const hasSession = Boolean(activeWallSessionId());
+  const canView = canMonitorDevice(device) || (screenOpen && activeDeviceId === device.id);
+  setWallInputReady(Boolean(hasSession && canControlDevice(device)));
+  wallControlTitle.textContent = deviceName(device);
+  if (!device.online) {
+    wallControlMeta.textContent = `${device.id} · 离线`;
+    return;
+  }
+  if (!hasScreenPermission(device)) {
+    wallControlMeta.textContent = `${device.id} · 屏幕未开`;
+    return;
+  }
+  if (!canView) {
+    wallControlMeta.textContent = `${device.id} · 不可监控`;
+    return;
+  }
+  wallControlMeta.textContent = `${device.id} · ${hasSession ? (wallInputReady ? "可操作" : "仅观看") : "连接中"}`;
+}
+
+function copyWallPreviewToControl(deviceId) {
+  const previewCanvas = screenWallGrid.querySelector(`canvas[data-wall-device="${cssEscape(deviceId)}"]`);
+  if (!previewCanvas || !previewCanvas.width || !previewCanvas.height) return false;
+  wallControlCanvas.width = previewCanvas.width;
+  wallControlCanvas.height = previewCanvas.height;
+  wallFrameSize = { width: previewCanvas.width, height: previewCanvas.height };
+  wallControlCtx.drawImage(previewCanvas, 0, 0);
+  wallControlViewer.classList.add("has-frame");
+  wallLastFrameTimestamp = Number(previewFrameTimestamps.get(deviceId) || Date.now());
+  return true;
+}
+
+function openWallControl(deviceId) {
+  wallActiveDeviceId = String(deviceId || "").trim().toUpperCase();
+  const device = devices.find((item) => item.id === wallActiveDeviceId);
+  wallControlWindow.classList.remove("hidden");
+  wallControlViewer.classList.remove("has-frame");
+  wallFrameSize = { width: 0, height: 0 };
+  wallFrameDrawSerial += 1;
+  wallLastFrameTimestamp = 0;
+  wallControlCtx.clearRect(0, 0, wallControlCanvas.width, wallControlCanvas.height);
+  wallControlTitle.textContent = device ? deviceName(device) : wallActiveDeviceId;
+  wallControlMeta.textContent = "正在准备画面";
+  copyWallPreviewToControl(wallActiveDeviceId);
+  updateWallControlState();
+  syncMonitorSessions();
+  wallControlCanvas.focus({ preventScroll: true });
+}
+
+function closeWallControl(resetActive = true) {
+  if (document.fullscreenElement === wallControlWindow) {
+    document.exitFullscreen().catch(() => {});
+  }
+  clearTimeout(wallPendingTextTimer);
+  wallPendingText = "";
+  wallDragStart = null;
+  wallDragLast = null;
+  wallDragMoved = false;
+  wallDragStartedRemote = false;
+  wallDragButton = "left";
+  setWallInputReady(false);
+  wallControlWindow.classList.add("hidden");
+  wallControlViewer.classList.remove("has-frame");
+  if (resetActive) wallActiveDeviceId = "";
+}
+
+async function toggleWallControlFullscreen() {
+  if (!isWallControlOpen()) return;
+  if (document.fullscreenElement === wallControlWindow) {
+    await document.exitFullscreen().catch(() => {});
+  } else {
+    await wallControlWindow.requestFullscreen().catch(() => {});
+  }
+  wallControlFullscreenBtn.textContent = document.fullscreenElement === wallControlWindow ? "恢复" : "全屏";
+  wallControlCanvas.focus({ preventScroll: true });
+}
+
+async function toggleWallTileFullscreen(tile) {
+  if (document.fullscreenElement === tile) {
+    await document.exitFullscreen().catch(() => {});
+  } else {
+    await tile.requestFullscreen().catch(() => {});
+  }
 }
 
 async function updateBinding(device, patch) {
@@ -670,13 +838,21 @@ function setInputReady(enabled) {
 }
 
 function setStageTab(tab) {
+  const previousTab = activeStageTab;
   activeStageTab = tab === "wall" ? "wall" : "control";
   controlTabBtn.classList.toggle("active", activeStageTab === "control");
   wallTabBtn.classList.toggle("active", activeStageTab === "wall");
+  stageBody.classList.toggle("wall-mode", activeStageTab === "wall");
   screenWorkspace.classList.toggle("hidden", activeStageTab !== "control");
   screenWall.classList.toggle("hidden", activeStageTab !== "wall");
   if (activeStageTab === "wall") {
+    if (screenOpen) closeScreen(true);
+    wallRenderKey = "";
     renderScreenWall();
+  } else if (previousTab === "wall") {
+    closeWallControl();
+    clearMonitorSessions(true);
+    wallRenderKey = "";
   }
 }
 
@@ -790,8 +966,11 @@ function handleTextFrame(msg) {
   if (msg.deviceId === activeDeviceId && screenOpen) {
     drawFrame(msg);
   }
-  if (shouldKeepMonitoring(msg.deviceId)) {
+  if (activeStageTab === "wall" && shouldKeepMonitoring(msg.deviceId)) {
     drawWallTextFrame(msg);
+  }
+  if (msg.deviceId === wallActiveDeviceId && isWallControlOpen()) {
+    drawWallControlTextFrame(msg);
   }
 }
 
@@ -812,6 +991,25 @@ function drawWallTextFrame(msg) {
     targetCanvas.getContext("2d").drawImage(img, 0, 0);
     previewFrameTimestamps.set(msg.deviceId, timestamp || Date.now());
     targetCanvas.closest(".wall-screen")?.classList.add("has-frame");
+  };
+  img.src = `data:image/jpeg;base64,${msg.image}`;
+}
+
+function drawWallControlTextFrame(msg) {
+  if (!msg.image || msg.frameKind && msg.frameKind !== "jpeg") return;
+  const timestamp = Number(msg.timestamp || 0);
+  if (timestamp && timestamp < wallLastFrameTimestamp) return;
+  const serial = ++wallFrameDrawSerial;
+  const img = new Image();
+  img.onload = () => {
+    if (serial !== wallFrameDrawSerial) return;
+    if (timestamp && timestamp < wallLastFrameTimestamp) return;
+    wallControlCanvas.width = img.naturalWidth;
+    wallControlCanvas.height = img.naturalHeight;
+    wallFrameSize = { width: img.naturalWidth, height: img.naturalHeight };
+    wallControlCtx.drawImage(img, 0, 0);
+    wallLastFrameTimestamp = timestamp || Date.now();
+    wallControlViewer.classList.add("has-frame");
   };
   img.src = `data:image/jpeg;base64,${msg.image}`;
 }
@@ -843,8 +1041,9 @@ async function handleBinaryFrame(data) {
   if (!frame?.header) return;
   const header = frame.header;
   const isActiveFrame = header.deviceId === activeDeviceId && screenOpen;
-  const isMonitorFrame = shouldKeepMonitoring(header.deviceId);
-  if (!isActiveFrame && !isMonitorFrame) return;
+  const isMonitorFrame = activeStageTab === "wall" && shouldKeepMonitoring(header.deviceId);
+  const isWallControlFrame = header.deviceId === wallActiveDeviceId && isWallControlOpen();
+  if (!isActiveFrame && !isMonitorFrame && !isWallControlFrame) return;
   if (header.frameKind && header.frameKind !== "jpeg") return;
   const timestamp = Number(header.timestamp || 0);
   const activeDrawSerial = isActiveFrame ? ++frameDrawSerial : 0;
@@ -874,6 +1073,9 @@ async function handleBinaryFrame(data) {
   if (isMonitorFrame) {
     drawWallBitmapFrame(header, bitmap, monitorSerial);
   }
+  if (isWallControlFrame) {
+    drawWallControlBitmapFrame(header, bitmap);
+  }
   bitmap.close();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "frame-ack", deviceId: header.deviceId, frameId: header.frameId || timestamp }));
@@ -895,6 +1097,17 @@ function drawWallBitmapFrame(header, bitmap, serial) {
   targetCanvas.closest(".wall-screen")?.classList.add("has-frame");
 }
 
+function drawWallControlBitmapFrame(header, bitmap) {
+  const timestamp = Number(header.timestamp || 0);
+  if (timestamp && timestamp < wallLastFrameTimestamp) return;
+  wallControlCanvas.width = bitmap.width;
+  wallControlCanvas.height = bitmap.height;
+  wallFrameSize = { width: bitmap.width, height: bitmap.height };
+  wallControlCtx.drawImage(bitmap, 0, 0);
+  wallLastFrameTimestamp = timestamp || Date.now();
+  wallControlViewer.classList.add("has-frame");
+}
+
 function cssEscape(value) {
   if (window.CSS?.escape) return CSS.escape(value);
   return String(value).replace(/["\\]/g, "\\$&");
@@ -907,6 +1120,16 @@ function canvasPoint(event) {
   return {
     x: Math.round(x * frameSize.width),
     y: Math.round(y * frameSize.height)
+  };
+}
+
+function wallCanvasPoint(event) {
+  const rect = wallControlCanvas.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+  return {
+    x: Math.round(x * wallFrameSize.width),
+    y: Math.round(y * wallFrameSize.height)
   };
 }
 
@@ -935,6 +1158,15 @@ function sendInput(payload) {
   ws.send(JSON.stringify({ type: "input", sessionId, ...payload }));
 }
 
+function sendWallInput(payload) {
+  const wallSessionId = activeWallSessionId();
+  if (!isWallControlOpen() || !wallSessionId || !wallInputReady || !ws || ws.readyState !== WebSocket.OPEN) {
+    updateWallControlState();
+    return;
+  }
+  ws.send(JSON.stringify({ type: "input", sessionId: wallSessionId, ...payload }));
+}
+
 function isTypingTarget(target) {
   const tag = String(target?.tagName || "").toLowerCase();
   return tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable;
@@ -948,10 +1180,24 @@ function flushPendingText() {
   sendInput({ action: "text", text });
 }
 
+function flushWallPendingText() {
+  clearTimeout(wallPendingTextTimer);
+  if (!wallPendingText) return;
+  const text = wallPendingText;
+  wallPendingText = "";
+  sendWallInput({ action: "text", text });
+}
+
 function queueTextInput(text) {
   pendingText += text;
   clearTimeout(pendingTextTimer);
   pendingTextTimer = setTimeout(flushPendingText, 60);
+}
+
+function queueWallTextInput(text) {
+  wallPendingText += text;
+  clearTimeout(wallPendingTextTimer);
+  wallPendingTextTimer = setTimeout(flushWallPendingText, 60);
 }
 
 function keyModifiers(event) {
@@ -967,6 +1213,12 @@ function shouldForwardKeyboard(event) {
   if (!screenOpen || !sessionId || !inputReady) return false;
   if (isTypingTarget(event.target)) return false;
   return true;
+}
+
+function shouldForwardWallKeyboard(event) {
+  if (!isWallControlOpen() || !activeWallSessionId() || !wallInputReady) return false;
+  if (isTypingTarget(event.target)) return false;
+  return event.target === wallControlCanvas || document.activeElement === wallControlCanvas;
 }
 
 authForm.addEventListener("submit", async (event) => {
@@ -1033,7 +1285,7 @@ logoutBtn.addEventListener("click", async () => {
   currentUser = null;
   devices = [];
   localStorage.removeItem("bhzn_session_token");
-  clearMonitorSessions(true);
+  clearMonitorSessions(true, true);
   closeSocket();
   closeScreen(false);
   setAuthMode("login");
@@ -1142,6 +1394,12 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 window.addEventListener("beforeinput", (event) => {
+  if (shouldForwardWallKeyboard(event)) {
+    if (event.inputType !== "insertText" || !event.data) return;
+    event.preventDefault();
+    queueWallTextInput(event.data);
+    return;
+  }
   if (!shouldForwardKeyboard(event)) return;
   if (event.inputType !== "insertText" || !event.data) return;
   event.preventDefault();
@@ -1149,6 +1407,24 @@ window.addEventListener("beforeinput", (event) => {
 });
 
 window.addEventListener("keydown", (event) => {
+  if (shouldForwardWallKeyboard(event)) {
+    const printable = event.key && event.key.length === 1;
+    const hasCommandModifier = event.ctrlKey || event.altKey || event.metaKey;
+    if (printable && !hasCommandModifier) {
+      event.preventDefault();
+      queueWallTextInput(event.key);
+      return;
+    }
+    flushWallPendingText();
+    event.preventDefault();
+    sendWallInput({
+      action: "key",
+      key: event.key,
+      code: event.code,
+      modifiers: keyModifiers(event)
+    });
+    return;
+  }
   if (!shouldForwardKeyboard(event)) return;
   const printable = event.key && event.key.length === 1;
   const hasCommandModifier = event.ctrlKey || event.altKey || event.metaKey;
@@ -1222,10 +1498,110 @@ canvas.addEventListener("wheel", (event) => {
   });
 }, { passive: false });
 
+wallControlCanvas.addEventListener("pointerdown", (event) => {
+  if (!activeWallSessionId() || wallFrameSize.width === 0) return;
+  event.preventDefault();
+  wallControlCanvas.focus({ preventScroll: true });
+  wallControlCanvas.setPointerCapture(event.pointerId);
+  const activeDevice = devices.find((item) => item.id === wallActiveDeviceId);
+  wallDragButton = event.button === 2 && isDesktopDevice(activeDevice) ? "right" : "left";
+  wallDragStart = { ...wallCanvasPoint(event), t: performance.now() };
+  wallDragLast = wallDragStart;
+  wallDragLastSentAt = wallDragStart.t;
+  wallDragMoved = false;
+  wallDragStartedRemote = false;
+});
+
+wallControlCanvas.addEventListener("pointermove", (event) => {
+  if (!wallDragStart || !wallDragLast) return;
+  event.preventDefault();
+  const now = performance.now();
+  const activeDevice = devices.find((item) => item.id === wallActiveDeviceId);
+  const desktopDrag = isDesktopDevice(activeDevice);
+  const minInterval = desktopDrag ? 10 : 55;
+  if (now - wallDragLastSentAt < minInterval) return;
+  const point = wallCanvasPoint(event);
+  const dxTotal = Math.abs(point.x - wallDragStart.x);
+  const dyTotal = Math.abs(point.y - wallDragStart.y);
+  const dx = Math.abs(point.x - wallDragLast.x);
+  const dy = Math.abs(point.y - wallDragLast.y);
+  const startThreshold = desktopDrag ? 1 : 10;
+  const moveThreshold = desktopDrag ? 1 : 4;
+  if (dxTotal < startThreshold && dyTotal < startThreshold) return;
+  if (dx < moveThreshold && dy < moveThreshold) return;
+  if (!wallDragStartedRemote) {
+    sendWallInput({ action: "dragStart", x: wallDragStart.x, y: wallDragStart.y, duration: 16, button: wallDragButton });
+    wallDragStartedRemote = true;
+  }
+  sendWallInput({
+    action: "dragMove",
+    x: point.x,
+    y: point.y,
+    duration: Math.max(16, Math.min(80, Math.round(now - wallDragLastSentAt))),
+    button: wallDragButton
+  });
+  wallDragMoved = true;
+  wallDragLast = point;
+  wallDragLastSentAt = now;
+});
+
+wallControlCanvas.addEventListener("pointerup", (event) => {
+  if (!wallDragStart) return;
+  event.preventDefault();
+  const end = wallCanvasPoint(event);
+  const dx = Math.abs(end.x - wallDragStart.x);
+  const dy = Math.abs(end.y - wallDragStart.y);
+  const now = performance.now();
+  const button = wallDragButton;
+  if (!wallDragMoved && dx < 12 && dy < 12) {
+    sendWallInput({ action: button === "right" ? "rightClick" : "tap", x: end.x, y: end.y, duration: 80, button });
+  } else if (wallDragLast && wallDragStartedRemote) {
+    sendWallInput({
+      action: "dragEnd",
+      x: end.x,
+      y: end.y,
+      duration: Math.max(16, Math.min(100, Math.round(now - wallDragLastSentAt))),
+      button
+    });
+  }
+  wallDragStart = null;
+  wallDragLast = null;
+  wallDragMoved = false;
+  wallDragStartedRemote = false;
+  wallDragButton = "left";
+});
+
+wallControlCanvas.addEventListener("pointercancel", () => {
+  wallDragStart = null;
+  wallDragLast = null;
+  wallDragMoved = false;
+  wallDragStartedRemote = false;
+  wallDragButton = "left";
+});
+
+wallControlCanvas.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
+
+wallControlCanvas.addEventListener("wheel", (event) => {
+  const activeDevice = devices.find((item) => item.id === wallActiveDeviceId);
+  if (!isDesktopDevice(activeDevice)) return;
+  event.preventDefault();
+  const point = wallCanvasPoint(event);
+  sendWallInput({
+    action: "scroll",
+    x: point.x,
+    y: point.y,
+    deltaX: Math.round(event.deltaX),
+    deltaY: Math.round(event.deltaY)
+  });
+}, { passive: false });
+
 closeScreenBtn.addEventListener("click", () => closeScreen(true));
 fullscreenBtn.addEventListener("click", toggleViewerFullscreen);
 document.addEventListener("fullscreenchange", () => {
   fullscreenBtn.textContent = isViewerFullscreen() ? "恢复" : "全屏";
+  wallControlFullscreenBtn.textContent = document.fullscreenElement === wallControlWindow ? "恢复" : "全屏";
 });
 backBtn.addEventListener("click", () => sendInput({ action: "back" }));
 homeBtn.addEventListener("click", () => sendInput({ action: "home" }));
@@ -1237,6 +1613,21 @@ homeSwipeBtn.addEventListener("click", () => {
     y: Math.max(1, frameSize.height - 8),
     x2: Math.round(frameSize.width / 2),
     y2: Math.round(frameSize.height * 0.55),
+    duration: 320
+  });
+});
+wallControlCloseBtn.addEventListener("click", () => closeWallControl());
+wallControlFullscreenBtn.addEventListener("click", toggleWallControlFullscreen);
+wallControlBackBtn.addEventListener("click", () => sendWallInput({ action: "back" }));
+wallControlHomeBtn.addEventListener("click", () => sendWallInput({ action: "home" }));
+wallControlHomeSwipeBtn.addEventListener("click", () => {
+  if (!wallFrameSize.width || !wallFrameSize.height) return;
+  sendWallInput({
+    action: "homeSwipe",
+    x: Math.round(wallFrameSize.width / 2),
+    y: Math.max(1, wallFrameSize.height - 8),
+    x2: Math.round(wallFrameSize.width / 2),
+    y2: Math.round(wallFrameSize.height * 0.55),
     duration: 320
   });
 });

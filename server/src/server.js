@@ -1203,7 +1203,7 @@ wss.on("connection", (ws) => {
         const sessionId = String(msg.sessionId || "");
         const controller = controllers.get(sessionId);
         if (!controller || controller.ws !== ws || controller.userId !== ws.userId) {
-          send(ws, { type: "error", error: "bad_session" });
+          send(ws, { type: "error", error: "bad_session", sessionId });
           return;
         }
         const device = devices.get(controller.deviceId);

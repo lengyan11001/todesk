@@ -144,6 +144,29 @@
             <strong>暂无监控画面</strong>
             <span>在设备卡片上勾选“时刻监控”，在线且已开屏幕权限的设备会自动显示。</span>
           </div>
+          <div id="wallControlWindow" class="wall-control-window hidden">
+            <header class="wall-control-titlebar">
+              <div>
+                <strong id="wallControlTitle">-</strong>
+                <span id="wallControlMeta">-</span>
+              </div>
+              <div class="wall-control-title-actions">
+                <button id="wallControlFullscreenBtn" type="button">全屏</button>
+                <button id="wallControlCloseBtn" type="button">关闭</button>
+              </div>
+            </header>
+            <div class="wall-control-body">
+              <div id="wallControlViewer" class="wall-control-viewer">
+                <canvas id="wallControlCanvas" width="360" height="720" tabindex="0"></canvas>
+                <div id="wallControlEmpty" class="wall-control-empty">等待监控画面</div>
+              </div>
+              <div class="wall-control-actions">
+                <button id="wallControlBackBtn" type="button" disabled>返回</button>
+                <button id="wallControlHomeBtn" type="button" disabled>Home</button>
+                <button id="wallControlHomeSwipeBtn" type="button" disabled>上滑返回</button>
+              </div>
+            </div>
+          </div>
         </section>
       </div>
     </section>
