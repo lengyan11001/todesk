@@ -22,6 +22,10 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
     private static final int REQ_MEDIA_PROJECTION = 1001;
@@ -30,6 +34,7 @@ public class MainActivity extends Activity {
     private LinearLayout content;
     private Button homeTab;
     private Button permissionTab;
+    private Button fileTab;
     private TextView statusLine;
     private int activeTab = 0;
 
@@ -103,8 +108,10 @@ public class MainActivity extends Activity {
         tabs.setBackgroundColor(Color.WHITE);
         homeTab = tabButton("设备");
         permissionTab = tabButton("权限");
+        fileTab = tabButton("文件");
         tabs.addView(homeTab, new LinearLayout.LayoutParams(0, dp(42), 1));
         tabs.addView(permissionTab, new LinearLayout.LayoutParams(0, dp(42), 1));
+        tabs.addView(fileTab, new LinearLayout.LayoutParams(0, dp(42), 1));
         root.addView(tabs);
 
         ScrollView scroll = new ScrollView(this);
@@ -128,6 +135,13 @@ public class MainActivity extends Activity {
                 render();
             }
         });
+        fileTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                activeTab = 2;
+                render();
+            }
+        });
         setContentView(root);
     }
 
@@ -147,11 +161,14 @@ public class MainActivity extends Activity {
         statusLine.setText(running ? (server ? "服务运行中 · 已连接服务器" : "服务运行中 · 正在连接服务器") : "服务未启动");
         homeTab.setEnabled(activeTab != 0);
         permissionTab.setEnabled(activeTab != 1);
+        fileTab.setEnabled(activeTab != 2);
         content.removeAllViews();
         if (activeTab == 0) {
             renderHome(media, input, running, server);
-        } else {
+        } else if (activeTab == 1) {
             renderPermissions(media, input, running);
+        } else {
+            renderFiles();
         }
     }
 
@@ -295,6 +312,89 @@ public class MainActivity extends Activity {
         card("接管准备状态", ready, 16, false);
     }
 
+    private void renderFiles() {
+        final List<FileTransferStore.Record> records = FileTransferStore.list(this);
+        TextView title = smallLabel("接收记录");
+        content.addView(title);
+
+        Button openDownloads = primaryButton("打开下载目录");
+        openDownloads.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openDownloadsFolder();
+            }
+        });
+        content.addView(openDownloads, blockParams());
+
+        if (records.isEmpty()) {
+            card("暂无文件", "H5 下发文件后，会在这里显示文件名、大小、保存位置和接收时间。", 16, false);
+            return;
+        }
+
+        for (final FileTransferStore.Record record : records) {
+            LinearLayout box = cardBox();
+            TextView name = new TextView(this);
+            name.setText(record.fileName);
+            name.setTextColor(Color.rgb(23, 32, 42));
+            name.setTextSize(17);
+            name.setTypeface(null, 1);
+
+            TextView detail = new TextView(this);
+            detail.setText(formatBytes(record.bytes) + " · " + formatTime(record.receivedAt) + "\n" + record.path);
+            detail.setTextColor(Color.rgb(92, 106, 122));
+            detail.setTextSize(13);
+            detail.setPadding(0, dp(6), 0, dp(12));
+
+            Button open = primaryButton("打开文件");
+            open.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    openReceivedFile(record);
+                }
+            });
+
+            box.addView(name);
+            box.addView(detail);
+            box.addView(open, new LinearLayout.LayoutParams(-1, dp(42)));
+            content.addView(box, blockParams());
+        }
+
+        Button clear = dangerButton("清空记录");
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FileTransferStore.clear(MainActivity.this);
+                render();
+            }
+        });
+        content.addView(clear, blockParams());
+    }
+
+    private void openReceivedFile(FileTransferStore.Record record) {
+        if (record.uri == null || record.uri.length() == 0) {
+            Toast.makeText(this, "文件地址为空", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(Uri.parse(record.uri), "*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(intent, "打开文件"));
+        } catch (Exception e) {
+            Toast.makeText(this, "没有可打开该文件的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void openDownloadsFolder() {
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setData(Uri.parse("content://com.android.externalstorage.documents/root/primary"));
+        try {
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "请在文件管理器中打开 Downloads/BHZN-ToDesk", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void permissionRow(String title, String detail, String action, View.OnClickListener listener) {
         LinearLayout box = cardBox();
         TextView titleView = new TextView(this);
@@ -372,6 +472,17 @@ public class MainActivity extends Activity {
 
     private String yesNo(boolean value) {
         return value ? "已开" : "未开";
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format(Locale.US, "%.1f KB", bytes / 1024f);
+        return String.format(Locale.US, "%.1f MB", bytes / 1024f / 1024f);
+    }
+
+    private String formatTime(long time) {
+        if (time <= 0) return "-";
+        return new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(new Date(time));
     }
 
     private void requestMediaProjection() {

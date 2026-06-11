@@ -1,11 +1,16 @@
 package top.bhzn.todesk;
 
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.MediaStore;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
@@ -28,6 +33,7 @@ final class FileTransferReceiver {
                 callback.onStatus("downloading", "", 0, "");
                 try {
                     Result result = receiveInner(context, fileName, size, sha256, url);
+                    FileTransferStore.add(context, result.fileName, result.path, result.uri, result.bytes);
                     callback.onStatus("saved", result.path, result.bytes, "");
                 } catch (Exception e) {
                     callback.onStatus("failed", "", 0, e.getMessage() == null ? e.toString() : e.getMessage());
@@ -63,45 +69,89 @@ final class FileTransferReceiver {
             throw new IllegalStateException("download http " + code);
         }
 
-        File dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-        if (dir == null) {
-            dir = new File(context.getFilesDir(), "downloads");
+        try (InputStream in = connection.getInputStream()) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return saveToMediaStore(context, in, fileName, size, sha256);
+            }
+            return saveToPublicDownloads(in, fileName, size, sha256);
+        } finally {
+            connection.disconnect();
         }
+    }
+
+    private static Result saveToMediaStore(Context context, InputStream in, String fileName, long size, String sha256) throws Exception {
+        String clean = safeName(fileName);
+        ContentResolver resolver = context.getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, clean);
+        values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
+        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/BHZN-ToDesk");
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
+        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            throw new IllegalStateException("create download item failed");
+        }
+        try {
+            long total;
+            try (OutputStream out = resolver.openOutputStream(uri)) {
+                if (out == null) throw new IllegalStateException("open download item failed");
+                total = copyAndVerify(in, out, size, sha256);
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.Downloads.IS_PENDING, 0);
+            resolver.update(uri, done, null, null);
+            return new Result(clean, "Downloads/BHZN-ToDesk/" + clean, uri.toString(), total);
+        } catch (Exception e) {
+            resolver.delete(uri, null, null);
+            throw e;
+        }
+    }
+
+    private static Result saveToPublicDownloads(InputStream in, String fileName, long size, String sha256) throws Exception {
+        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "BHZN-ToDesk");
         if (!dir.exists() && !dir.mkdirs()) {
             throw new IllegalStateException("create download dir failed");
         }
         File output = uniqueFile(dir, fileName);
         File temp = new File(output.getParentFile(), output.getName() + ".download");
+        try {
+            long total;
+            try (FileOutputStream out = new FileOutputStream(temp)) {
+                total = copyAndVerify(in, out, size, sha256);
+                out.getFD().sync();
+            }
+            if (!temp.renameTo(output)) {
+                throw new IllegalStateException("save file failed");
+            }
+            return new Result(output.getName(), output.getAbsolutePath(), Uri.fromFile(output).toString(), total);
+        } catch (Exception e) {
+            temp.delete();
+            throw e;
+        }
+    }
+
+    private static long copyAndVerify(InputStream in, OutputStream out, long size, String sha256) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         long total = 0;
         byte[] buffer = new byte[64 * 1024];
-        try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(temp)) {
-            int read;
-            while ((read = in.read(buffer)) >= 0) {
-                if (read == 0) continue;
-                total += read;
-                if (total > size) {
-                    throw new IllegalStateException("file larger than expected");
-                }
-                digest.update(buffer, 0, read);
-                out.write(buffer, 0, read);
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            if (read == 0) continue;
+            total += read;
+            if (total > size) {
+                throw new IllegalStateException("file larger than expected");
             }
-            out.getFD().sync();
+            digest.update(buffer, 0, read);
+            out.write(buffer, 0, read);
         }
         if (total != size) {
-            temp.delete();
             throw new IllegalStateException("file size mismatch");
         }
         String actual = hex(digest.digest());
         if (!actual.equalsIgnoreCase(sha256)) {
-            temp.delete();
             throw new IllegalStateException("file sha256 mismatch");
         }
-        if (!temp.renameTo(output)) {
-            temp.delete();
-            throw new IllegalStateException("save file failed");
-        }
-        return new Result(output.getAbsolutePath(), total);
+        return total;
     }
 
     private static File uniqueFile(File dir, String fileName) {
@@ -137,11 +187,15 @@ final class FileTransferReceiver {
     }
 
     private static final class Result {
+        final String fileName;
         final String path;
+        final String uri;
         final long bytes;
 
-        Result(String path, long bytes) {
+        Result(String fileName, String path, String uri, long bytes) {
+            this.fileName = fileName;
             this.path = path;
+            this.uri = uri;
             this.bytes = bytes;
         }
     }
