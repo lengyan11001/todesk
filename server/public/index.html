@@ -78,6 +78,10 @@
           <div id="activeTitle" class="active-title">未打开屏幕</div>
           <div id="activeMeta" class="active-meta">点击下方设备入口，打开对应设备屏幕。</div>
         </div>
+        <div class="stage-tabs">
+          <button id="controlTabBtn" class="stage-tab active" type="button">远程控制</button>
+          <button id="wallTabBtn" class="stage-tab" type="button">屏幕墙</button>
+        </div>
         <div class="account-menu">
           <button id="accountMenuBtn" class="avatar-button" type="button" aria-haspopup="true" aria-expanded="false">
             <span id="avatarInitial">-</span>
@@ -122,6 +126,25 @@
             <span>点击上方任意已添加设备，即可展示该设备屏幕。</span>
           </div>
         </div>
+
+        <section id="screenWall" class="screen-wall hidden">
+          <header class="wall-toolbar">
+            <div>
+              <strong>屏幕墙</strong>
+              <span>勾选“时刻监控”的在线设备会在这里持续展示。</span>
+            </div>
+            <label class="wall-size-control">
+              <span>大小</span>
+              <input id="wallSizeRange" type="range" min="180" max="520" step="20" value="280">
+              <output id="wallSizeValue">280px</output>
+            </label>
+          </header>
+          <div id="screenWallGrid" class="screen-wall-grid"></div>
+          <div id="screenWallEmpty" class="screen-wall-empty">
+            <strong>暂无监控画面</strong>
+            <span>在设备卡片上勾选“时刻监控”，在线且已开屏幕权限的设备会自动显示。</span>
+          </div>
+        </section>
       </div>
     </section>
   </main>

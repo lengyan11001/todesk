@@ -27,8 +27,16 @@ const fileTransferLog = document.getElementById("fileTransferLog");
 const deviceShelf = document.getElementById("deviceShelf");
 const activeTitle = document.getElementById("activeTitle");
 const activeMeta = document.getElementById("activeMeta");
+const controlTabBtn = document.getElementById("controlTabBtn");
+const wallTabBtn = document.getElementById("wallTabBtn");
+const screenWorkspace = document.getElementById("screenWorkspace");
 const viewerWrap = document.getElementById("viewerWrap");
 const screenPlaceholder = document.getElementById("screenPlaceholder");
+const screenWall = document.getElementById("screenWall");
+const screenWallGrid = document.getElementById("screenWallGrid");
+const screenWallEmpty = document.getElementById("screenWallEmpty");
+const wallSizeRange = document.getElementById("wallSizeRange");
+const wallSizeValue = document.getElementById("wallSizeValue");
 const viewer = document.getElementById("viewer");
 const canvas = document.getElementById("screenCanvas");
 const ctx = canvas.getContext("2d");
@@ -54,7 +62,9 @@ let devices = [];
 let activeDeviceId = "";
 let sessionId = "";
 let screenOpen = false;
-let viewerHidden = false;
+let activeStageTab = "control";
+const monitorSessions = new Map();
+const pendingControlIntents = new Map();
 let dragStart = null;
 let dragLast = null;
 let dragLastSentAt = 0;
@@ -67,6 +77,9 @@ let pendingText = "";
 let pendingTextTimer = 0;
 let frameDrawSerial = 0;
 let lastFrameTimestamp = 0;
+const previewFrameSerials = new Map();
+const previewFrameTimestamps = new Map();
+let wallRenderKey = "";
 let fileTransfers = [];
 
 function devicePlatform(device) {
@@ -193,6 +206,7 @@ function setUser(user) {
 
   closeSocket();
   devices = [];
+  clearMonitorSessions(false);
   sessionId = "";
   activeDeviceId = "";
   closeScreen(false);
@@ -217,12 +231,13 @@ function connect() {
   const socketGeneration = ++wsGeneration;
   ws = new WebSocket(wsUrl());
   ws.binaryType = "arraybuffer";
-  ws.addEventListener("open", () => {
-    if (socketGeneration !== wsGeneration) return;
-    sessionId = "";
-    setInputReady(false);
-    ws.send(JSON.stringify({ type: "hello-controller", token: sessionToken }));
-  });
+    ws.addEventListener("open", () => {
+      if (socketGeneration !== wsGeneration) return;
+      sessionId = "";
+      clearMonitorSessions(false);
+      setInputReady(false);
+      ws.send(JSON.stringify({ type: "hello-controller", token: sessionToken }));
+    });
   ws.addEventListener("close", () => {
     if (socketGeneration !== wsGeneration) return;
     if (!sessionToken || currentUser?.status !== "approved") return;
@@ -242,12 +257,21 @@ function connect() {
       devices = msg.devices || [];
       syncActiveDeviceState();
       renderDevices();
+      syncMonitorSessions();
+      renderScreenWall();
       resumeActiveControl();
     }
     if (msg.type === "file-transfer" && msg.transfer) {
       upsertFileTransfer(msg.transfer);
     }
     if (msg.type === "control-ready") {
+      const intent = pendingControlIntents.get(msg.device.id);
+      pendingControlIntents.delete(msg.device.id);
+      if (intent === "monitor") {
+        monitorSessions.set(msg.device.id, msg.sessionId);
+        renderScreenWall();
+        return;
+      }
       sessionId = msg.sessionId;
       activeDeviceId = msg.device.id;
       openScreen();
@@ -259,10 +283,16 @@ function connect() {
         ? `${deviceName(msg.device)} · ${msg.device.model || msg.device.osVersion || "未知型号"}`
         : `已进入画面，仅可观看：${platformText(msg.device)} 端未开启控制权限或允许控制开关`;
     }
-    if (msg.type === "frame" && msg.deviceId === activeDeviceId && screenOpen) {
-      drawFrame(msg);
+    if (msg.type === "frame") {
+      handleTextFrame(msg);
     }
     if (msg.type === "control-stopped") {
+      const monitorDeviceId = deviceIdByMonitorSession(msg.sessionId);
+      if (monitorDeviceId) {
+        monitorSessions.delete(monitorDeviceId);
+        renderScreenWall();
+        return;
+      }
       if (msg.sessionId && sessionId && msg.sessionId !== sessionId) return;
       sessionId = "";
       setControls(false);
@@ -281,32 +311,21 @@ function connect() {
 
 function openScreen() {
   screenOpen = true;
-  viewerHidden = false;
   viewerWrap.classList.remove("closed");
   screenPlaceholder.classList.add("hidden");
   fullscreenBtn.textContent = isViewerFullscreen() ? "恢复" : "全屏";
 }
 
 function closeScreen(stopRemote = true) {
+  const closingDeviceId = activeDeviceId;
   if (isViewerFullscreen()) {
     document.exitFullscreen().catch(() => {});
   }
   fullscreenBtn.textContent = "全屏";
-  const keepMonitoring = stopRemote && Boolean(sessionId) && shouldKeepMonitoring(activeDeviceId);
-  if (keepMonitoring) {
-    viewerHidden = true;
-    viewerWrap.classList.add("closed");
-    screenPlaceholder.classList.remove("hidden");
-    activeTitle.textContent = "屏幕已隐藏";
-    activeMeta.textContent = "已保持后台观看，重新点击设备可恢复画面。";
-    renderDevices();
-    return;
-  }
   if (stopRemote && sessionId && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "stop-control", sessionId }));
   }
   screenOpen = false;
-  viewerHidden = false;
   sessionId = "";
   activeDeviceId = "";
   frameSize = { width: 0, height: 0 };
@@ -321,14 +340,18 @@ function closeScreen(stopRemote = true) {
   activeTitle.textContent = "未打开屏幕";
   activeMeta.textContent = "点击下方设备入口，打开对应设备屏幕。";
   renderDevices();
+  if (closingDeviceId && shouldKeepMonitoring(closingDeviceId)) {
+    syncMonitorSessions();
+    renderScreenWall();
+  }
 }
 
 function resumeActiveControl() {
   if (!screenOpen || !activeDeviceId || sessionId || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (viewerHidden && !shouldKeepMonitoring(activeDeviceId)) return;
   const device = devices.find((item) => item.id === activeDeviceId);
   if (!device?.online || !hasScreenPermission(device)) return;
   activeMeta.textContent = "连接恢复，正在重新进入设备";
+  pendingControlIntents.set(activeDeviceId, "control");
   ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
 }
 
@@ -389,6 +412,118 @@ function shouldKeepMonitoring(deviceId) {
   return Boolean(device?.monitorAlways);
 }
 
+function monitoredDevices() {
+  return devices.filter((device) => device.monitorAlways);
+}
+
+function canMonitorDevice(device) {
+  return Boolean(device?.online && hasScreenPermission(device));
+}
+
+function deviceIdByMonitorSession(targetSessionId) {
+  if (!targetSessionId) return "";
+  for (const [deviceId, monitorSessionId] of monitorSessions) {
+    if (monitorSessionId === targetSessionId) return deviceId;
+  }
+  return "";
+}
+
+function clearMonitorSessions(notifyRemote = true) {
+  if (notifyRemote && ws?.readyState === WebSocket.OPEN) {
+    for (const monitorSessionId of monitorSessions.values()) {
+      ws.send(JSON.stringify({ type: "stop-control", sessionId: monitorSessionId }));
+    }
+  }
+  monitorSessions.clear();
+  pendingControlIntents.clear();
+  previewFrameSerials.clear();
+  previewFrameTimestamps.clear();
+}
+
+function stopMonitorSession(deviceId) {
+  const monitorSessionId = monitorSessions.get(deviceId);
+  if (monitorSessionId && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop-control", sessionId: monitorSessionId }));
+  }
+  monitorSessions.delete(deviceId);
+  pendingControlIntents.delete(deviceId);
+  previewFrameSerials.delete(deviceId);
+  previewFrameTimestamps.delete(deviceId);
+}
+
+function syncMonitorSessions() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const wanted = new Set(monitoredDevices().filter(canMonitorDevice).map((device) => device.id));
+  if (sessionId && activeDeviceId) {
+    wanted.delete(activeDeviceId);
+  }
+
+  for (const [deviceId, monitorSessionId] of Array.from(monitorSessions)) {
+    if (wanted.has(deviceId)) continue;
+    ws.send(JSON.stringify({ type: "stop-control", sessionId: monitorSessionId }));
+    monitorSessions.delete(deviceId);
+    previewFrameSerials.delete(deviceId);
+    previewFrameTimestamps.delete(deviceId);
+  }
+
+  for (const deviceId of Array.from(pendingControlIntents.keys())) {
+    if (pendingControlIntents.get(deviceId) === "monitor" && !wanted.has(deviceId)) {
+      pendingControlIntents.delete(deviceId);
+    }
+  }
+
+  for (const device of devices) {
+    if (!wanted.has(device.id)) continue;
+    if (monitorSessions.has(device.id) || pendingControlIntents.get(device.id) === "monitor") continue;
+    pendingControlIntents.set(device.id, "monitor");
+    ws.send(JSON.stringify({ type: "control", deviceId: device.id }));
+  }
+}
+
+function renderScreenWall() {
+  if (!screenWallGrid) return;
+  const wallDevices = monitoredDevices();
+  const nextKey = wallDevices.map((device) => `${device.id}:${device.online ? 1 : 0}:${hasScreenPermission(device) ? 1 : 0}`).join("|");
+  screenWallEmpty.classList.toggle("hidden", wallDevices.length > 0);
+  if (nextKey === wallRenderKey) {
+    updateWallSize();
+    return;
+  }
+  wallRenderKey = nextKey;
+  screenWallGrid.innerHTML = "";
+  for (const device of wallDevices) {
+    const online = canMonitorDevice(device);
+    const tile = document.createElement("article");
+    tile.className = `wall-tile ${online ? "" : "offline"}`;
+    tile.style.setProperty("--tile-width", `${Number(wallSizeRange.value || 280)}px`);
+    tile.innerHTML = `
+      <header>
+        <strong>${escapeHtml(deviceName(device))}</strong>
+        <span>${escapeHtml(device.id)} · ${online ? "监控中" : (device.online ? "屏幕未开" : "离线")}</span>
+      </header>
+      <div class="wall-screen">
+        <canvas data-wall-device="${escapeAttr(device.id)}"></canvas>
+        <div class="wall-screen-empty">${online ? "等待画面" : "不可监控"}</div>
+      </div>
+      <footer>
+        <button type="button" data-open-device="${escapeAttr(device.id)}">放大操作</button>
+      </footer>
+    `;
+    tile.querySelector("[data-open-device]").addEventListener("click", () => {
+      setStageTab("control");
+      startControl(device.id);
+    });
+    screenWallGrid.appendChild(tile);
+  }
+  syncMonitorSessions();
+}
+
+function updateWallSize() {
+  const size = Number(wallSizeRange.value || 280);
+  wallSizeValue.textContent = `${size}px`;
+  screenWallGrid.style.setProperty("--tile-width", `${size}px`);
+}
+
 async function updateBinding(device, patch) {
   if (!device.bindingId) return;
   try {
@@ -397,11 +532,9 @@ async function updateBinding(device, patch) {
       body: patch
     });
     devices = data.devices || devices;
-    if (Object.prototype.hasOwnProperty.call(patch, "monitorAlways") && !patch.monitorAlways && activeDeviceId === device.id && viewerHidden) {
-      closeScreen(true);
-      return;
-    }
     renderDevices();
+    syncMonitorSessions();
+    renderScreenWall();
     if (activeDeviceId) syncActiveDeviceState();
   } catch (error) {
     bindHint.textContent = errorText(error.data || { error: error.message });
@@ -415,6 +548,7 @@ async function deleteBinding(device) {
   try {
     const data = await api(`/api/bindings/${encodeURIComponent(device.bindingId)}`, { method: "DELETE" });
     devices = data.devices || [];
+    stopMonitorSession(device.id);
     if (activeDeviceId === device.id) {
       closeScreen(false);
     }
@@ -535,6 +669,17 @@ function setInputReady(enabled) {
   homeSwipeBtn.disabled = !inputReady;
 }
 
+function setStageTab(tab) {
+  activeStageTab = tab === "wall" ? "wall" : "control";
+  controlTabBtn.classList.toggle("active", activeStageTab === "control");
+  wallTabBtn.classList.toggle("active", activeStageTab === "wall");
+  screenWorkspace.classList.toggle("hidden", activeStageTab !== "control");
+  screenWall.classList.toggle("hidden", activeStageTab !== "wall");
+  if (activeStageTab === "wall") {
+    renderScreenWall();
+  }
+}
+
 function errorText(msg) {
   const device = msg.device || {};
   if (msg.error === "screen_not_ready") return `设备已在线，但 ${platformText(device)} 端还没有开启屏幕权限`;
@@ -558,19 +703,18 @@ function startControl(id) {
   const previousDeviceId = activeDeviceId;
   const previousSessionId = sessionId;
   const device = devices.find((item) => item.id === nextDeviceId);
-  if (screenOpen && viewerHidden && previousSessionId && previousDeviceId === nextDeviceId) {
-    openScreen();
-    if (device) setActiveDevice(device);
-    setInputReady(canControlDevice(device));
-    stopBtn.disabled = false;
-    canvas.focus({ preventScroll: true });
-    return;
-  }
   if (previousSessionId && previousDeviceId && previousDeviceId !== nextDeviceId && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "stop-control", sessionId: previousSessionId }));
     sessionId = "";
+    if (shouldKeepMonitoring(previousDeviceId)) {
+      setTimeout(() => {
+        syncMonitorSessions();
+        renderScreenWall();
+      }, 0);
+    }
   }
   activeDeviceId = nextDeviceId;
+  stopMonitorSession(activeDeviceId);
   openScreen();
   viewer.classList.remove("has-frame");
   frameDrawSerial += 1;
@@ -582,6 +726,7 @@ function startControl(id) {
     return;
   }
   activeMeta.textContent = "正在请求控制";
+  pendingControlIntents.set(activeDeviceId, "control");
   ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
 }
 
@@ -641,6 +786,36 @@ function drawFrame(msg) {
   img.src = `data:image/jpeg;base64,${msg.image}`;
 }
 
+function handleTextFrame(msg) {
+  if (msg.deviceId === activeDeviceId && screenOpen) {
+    drawFrame(msg);
+  }
+  if (shouldKeepMonitoring(msg.deviceId)) {
+    drawWallTextFrame(msg);
+  }
+}
+
+function drawWallTextFrame(msg) {
+  if (!msg.image || msg.frameKind && msg.frameKind !== "jpeg") return;
+  const targetCanvas = screenWallGrid.querySelector(`canvas[data-wall-device="${cssEscape(msg.deviceId)}"]`);
+  if (!targetCanvas) return;
+  const timestamp = Number(msg.timestamp || 0);
+  const lastTimestamp = Number(previewFrameTimestamps.get(msg.deviceId) || 0);
+  if (timestamp && timestamp < lastTimestamp) return;
+  const serial = (previewFrameSerials.get(msg.deviceId) || 0) + 1;
+  previewFrameSerials.set(msg.deviceId, serial);
+  const img = new Image();
+  img.onload = () => {
+    if (previewFrameSerials.get(msg.deviceId) !== serial) return;
+    targetCanvas.width = img.naturalWidth;
+    targetCanvas.height = img.naturalHeight;
+    targetCanvas.getContext("2d").drawImage(img, 0, 0);
+    previewFrameTimestamps.set(msg.deviceId, timestamp || Date.now());
+    targetCanvas.closest(".wall-screen")?.classList.add("has-frame");
+  };
+  img.src = `data:image/jpeg;base64,${msg.image}`;
+}
+
 function parseBinaryFrame(data) {
   const buffer = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   if (buffer.byteLength < binaryFrameMagic.length + 4) return null;
@@ -667,32 +842,62 @@ async function handleBinaryFrame(data) {
   }
   if (!frame?.header) return;
   const header = frame.header;
-  if (header.deviceId !== activeDeviceId || !screenOpen) return;
+  const isActiveFrame = header.deviceId === activeDeviceId && screenOpen;
+  const isMonitorFrame = shouldKeepMonitoring(header.deviceId);
+  if (!isActiveFrame && !isMonitorFrame) return;
   if (header.frameKind && header.frameKind !== "jpeg") return;
   const timestamp = Number(header.timestamp || 0);
-  if (timestamp && timestamp < lastFrameTimestamp) return;
-  const drawSerial = ++frameDrawSerial;
+  const activeDrawSerial = isActiveFrame ? ++frameDrawSerial : 0;
+  const monitorSerial = isMonitorFrame ? (previewFrameSerials.get(header.deviceId) || 0) + 1 : 0;
+  if (isMonitorFrame) previewFrameSerials.set(header.deviceId, monitorSerial);
   let bitmap;
   try {
     bitmap = await createImageBitmap(new Blob([frame.image], { type: "image/jpeg" }));
   } catch {
     return;
   }
-  if (drawSerial !== frameDrawSerial || (timestamp && timestamp < lastFrameTimestamp)) {
-    bitmap.close();
-    return;
+  if (isActiveFrame) {
+    if (timestamp && timestamp < lastFrameTimestamp) {
+      bitmap.close();
+      return;
+    }
+    if (activeDrawSerial === frameDrawSerial) {
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      frameSize = { width: bitmap.width, height: bitmap.height };
+      viewer.style.aspectRatio = `${bitmap.width} / ${bitmap.height}`;
+      ctx.drawImage(bitmap, 0, 0);
+      lastFrameTimestamp = timestamp || Date.now();
+      viewer.classList.add("has-frame");
+    }
   }
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  frameSize = { width: bitmap.width, height: bitmap.height };
-  viewer.style.aspectRatio = `${bitmap.width} / ${bitmap.height}`;
-  ctx.drawImage(bitmap, 0, 0);
+  if (isMonitorFrame) {
+    drawWallBitmapFrame(header, bitmap, monitorSerial);
+  }
   bitmap.close();
-  lastFrameTimestamp = timestamp || Date.now();
-  viewer.classList.add("has-frame");
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "frame-ack", deviceId: header.deviceId, frameId: header.frameId || timestamp }));
   }
+}
+
+function drawWallBitmapFrame(header, bitmap, serial) {
+  const deviceId = header.deviceId;
+  if (serial && previewFrameSerials.get(deviceId) !== serial) return;
+  const targetCanvas = screenWallGrid.querySelector(`canvas[data-wall-device="${cssEscape(deviceId)}"]`);
+  if (!targetCanvas) return;
+  const timestamp = Number(header.timestamp || 0);
+  const lastTimestamp = Number(previewFrameTimestamps.get(deviceId) || 0);
+  if (timestamp && timestamp < lastTimestamp) return;
+  targetCanvas.width = bitmap.width;
+  targetCanvas.height = bitmap.height;
+  targetCanvas.getContext("2d").drawImage(bitmap, 0, 0);
+  previewFrameTimestamps.set(deviceId, timestamp || Date.now());
+  targetCanvas.closest(".wall-screen")?.classList.add("has-frame");
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function canvasPoint(event) {
@@ -719,7 +924,7 @@ function hideRemoteCursor() {
 }
 
 function sendInput(payload) {
-  if (!screenOpen || viewerHidden || !sessionId || !inputReady || !ws || ws.readyState !== WebSocket.OPEN) {
+  if (!screenOpen || !sessionId || !inputReady || !ws || ws.readyState !== WebSocket.OPEN) {
     if (screenOpen && !sessionId) resumeActiveControl();
     if (sessionId && !inputReady) {
       const activeDevice = devices.find((item) => item.id === activeDeviceId);
@@ -759,7 +964,7 @@ function keyModifiers(event) {
 }
 
 function shouldForwardKeyboard(event) {
-  if (!screenOpen || viewerHidden || !sessionId || !inputReady) return false;
+  if (!screenOpen || !sessionId || !inputReady) return false;
   if (isTypingTarget(event.target)) return false;
   return true;
 }
@@ -786,6 +991,8 @@ authForm.addEventListener("submit", async (event) => {
       const list = await api("/api/devices");
       devices = list.devices || [];
       renderDevices();
+      syncMonitorSessions();
+      renderScreenWall();
     }
   } catch (error) {
     authHint.textContent = errorText(error.data || { error: error.message });
@@ -796,6 +1003,9 @@ authForm.addEventListener("submit", async (event) => {
 
 loginModeBtn.addEventListener("click", () => setAuthMode("login"));
 registerModeBtn.addEventListener("click", () => setAuthMode("register"));
+controlTabBtn.addEventListener("click", () => setStageTab("control"));
+wallTabBtn.addEventListener("click", () => setStageTab("wall"));
+wallSizeRange.addEventListener("input", updateWallSize);
 
 accountMenuBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -823,6 +1033,7 @@ logoutBtn.addEventListener("click", async () => {
   currentUser = null;
   devices = [];
   localStorage.removeItem("bhzn_session_token");
+  clearMonitorSessions(true);
   closeSocket();
   closeScreen(false);
   setAuthMode("login");
@@ -882,7 +1093,7 @@ fileTransferForm.addEventListener("submit", async (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (viewerHidden || !sessionId || frameSize.width === 0) return;
+  if (!sessionId || frameSize.width === 0) return;
   event.preventDefault();
   canvas.focus({ preventScroll: true });
   canvas.setPointerCapture(event.pointerId);
@@ -998,7 +1209,6 @@ canvas.addEventListener("contextmenu", (event) => {
 });
 
 canvas.addEventListener("wheel", (event) => {
-  if (viewerHidden) return;
   const activeDevice = devices.find((item) => item.id === activeDeviceId);
   if (!isDesktopDevice(activeDevice)) return;
   event.preventDefault();
@@ -1053,6 +1263,8 @@ async function boot() {
       const list = await api("/api/devices");
       devices = list.devices || [];
       renderDevices();
+      syncMonitorSessions();
+      renderScreenWall();
     }
   } catch {
     sessionToken = "";
