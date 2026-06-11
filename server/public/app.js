@@ -10,6 +10,9 @@ const authSubmitBtn = document.getElementById("authSubmitBtn");
 const authHint = document.getElementById("authHint");
 const accountName = document.getElementById("accountName");
 const accountStatus = document.getElementById("accountStatus");
+const accountMenuBtn = document.getElementById("accountMenuBtn");
+const accountDropdown = document.getElementById("accountDropdown");
+const avatarInitial = document.getElementById("avatarInitial");
 const logoutBtn = document.getElementById("logoutBtn");
 const addForm = document.getElementById("addForm");
 const deviceIdInput = document.getElementById("deviceIdInput");
@@ -33,6 +36,7 @@ const remoteCursor = document.createElement("div");
 remoteCursor.className = "remote-cursor hidden";
 viewer.appendChild(remoteCursor);
 const closeScreenBtn = document.getElementById("closeScreenBtn");
+const fullscreenBtn = document.getElementById("fullscreenBtn");
 const backBtn = document.getElementById("backBtn");
 const homeBtn = document.getElementById("homeBtn");
 const homeSwipeBtn = document.getElementById("homeSwipeBtn");
@@ -50,6 +54,7 @@ let devices = [];
 let activeDeviceId = "";
 let sessionId = "";
 let screenOpen = false;
+let viewerHidden = false;
 let dragStart = null;
 let dragLast = null;
 let dragLastSentAt = 0;
@@ -176,6 +181,7 @@ function setUser(user) {
   const approved = user?.status === "approved";
   accountName.textContent = user?.username || "-";
   accountStatus.textContent = user ? statusText(user.status) : "-";
+  avatarInitial.textContent = user?.username ? user.username.slice(0, 1).toUpperCase() : "-";
   serverState.textContent = user
     ? (approved ? "账号已审核" : statusText(user.status))
     : "请先登录";
@@ -275,15 +281,32 @@ function connect() {
 
 function openScreen() {
   screenOpen = true;
+  viewerHidden = false;
   viewerWrap.classList.remove("closed");
   screenPlaceholder.classList.add("hidden");
+  fullscreenBtn.textContent = isViewerFullscreen() ? "恢复" : "全屏";
 }
 
 function closeScreen(stopRemote = true) {
+  if (isViewerFullscreen()) {
+    document.exitFullscreen().catch(() => {});
+  }
+  fullscreenBtn.textContent = "全屏";
+  const keepMonitoring = stopRemote && Boolean(sessionId) && shouldKeepMonitoring(activeDeviceId);
+  if (keepMonitoring) {
+    viewerHidden = true;
+    viewerWrap.classList.add("closed");
+    screenPlaceholder.classList.remove("hidden");
+    activeTitle.textContent = "屏幕已隐藏";
+    activeMeta.textContent = "已保持后台观看，重新点击设备可恢复画面。";
+    renderDevices();
+    return;
+  }
   if (stopRemote && sessionId && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "stop-control", sessionId }));
   }
   screenOpen = false;
+  viewerHidden = false;
   sessionId = "";
   activeDeviceId = "";
   frameSize = { width: 0, height: 0 };
@@ -302,6 +325,7 @@ function closeScreen(stopRemote = true) {
 
 function resumeActiveControl() {
   if (!screenOpen || !activeDeviceId || sessionId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (viewerHidden && !shouldKeepMonitoring(activeDeviceId)) return;
   const device = devices.find((item) => item.id === activeDeviceId);
   if (!device?.online || !hasScreenPermission(device)) return;
   activeMeta.textContent = "连接恢复，正在重新进入设备";
@@ -318,27 +342,70 @@ function renderDevices() {
   deviceShelf.innerHTML = "";
   for (const device of devices) {
     const desktop = isDesktopDevice(device);
-    const btn = document.createElement("button");
-    btn.className = `phone-card ${desktop ? "desktop-card" : ""} ${device.id === activeDeviceId ? "active" : ""} ${device.online ? "" : "offline"}`;
-    btn.innerHTML = `
+    const card = document.createElement("div");
+    card.className = `phone-card ${desktop ? "desktop-card" : ""} ${device.id === activeDeviceId ? "active" : ""} ${device.online ? "" : "offline"}`;
+    card.innerHTML = `
       <span class="phone-delete" title="删除设备" data-binding-id="${device.bindingId || ""}">×</span>
       <span class="phone-top"></span>
-      <strong>${device.id}</strong>
-      <em>${deviceName(device)}</em>
+      <strong>${escapeHtml(device.id)}</strong>
+      <input class="device-label-input" value="${escapeAttr(deviceName(device))}" aria-label="设备标记">
       <small class="device-status ${device.online ? "online" : "offline"}">${device.online ? "在线" : "离线"}</small>
       <div class="badges">
-        <i class="badge agent-badge">${device.agentVersion ? `Agent ${device.agentVersion}` : "Agent -"}</i>
+        <i class="badge agent-badge">${escapeHtml(device.agentVersion ? `Agent ${device.agentVersion}` : "Agent -")}</i>
         <i class="badge ${hasScreenPermission(device) ? "" : "warn"}">屏幕${hasScreenPermission(device) ? "已开" : "未开"}</i>
         <i class="badge ${hasInputPermission(device) ? "" : "warn"}">控制${hasInputPermission(device) ? "已开" : "未开"}</i>
       </div>
+      <label class="monitor-toggle">
+        <input type="checkbox" ${device.monitorAlways ? "checked" : ""}>
+        <span>时刻监控</span>
+      </label>
     `;
-    btn.addEventListener("click", () => startControl(device.id));
-    const deleteBtn = btn.querySelector(".phone-delete");
+    card.addEventListener("click", () => startControl(device.id));
+    const deleteBtn = card.querySelector(".phone-delete");
     deleteBtn.addEventListener("click", (event) => {
       event.stopPropagation();
       deleteBinding(device);
     });
-    deviceShelf.appendChild(btn);
+    const labelInput = card.querySelector(".device-label-input");
+    labelInput.addEventListener("click", (event) => event.stopPropagation());
+    labelInput.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") labelInput.blur();
+    });
+    labelInput.addEventListener("blur", () => updateBinding(device, { label: labelInput.value.trim() }));
+
+    const monitorToggle = card.querySelector(".monitor-toggle");
+    monitorToggle.addEventListener("click", (event) => event.stopPropagation());
+    const monitorInput = card.querySelector(".monitor-toggle input");
+    monitorInput.addEventListener("click", (event) => event.stopPropagation());
+    monitorInput.addEventListener("change", () => updateBinding(device, { monitorAlways: monitorInput.checked }));
+    deviceShelf.appendChild(card);
+  }
+}
+
+function shouldKeepMonitoring(deviceId) {
+  if (!deviceId) return false;
+  const device = devices.find((item) => item.id === deviceId);
+  return Boolean(device?.monitorAlways);
+}
+
+async function updateBinding(device, patch) {
+  if (!device.bindingId) return;
+  try {
+    const data = await api(`/api/bindings/${encodeURIComponent(device.bindingId)}`, {
+      method: "PATCH",
+      body: patch
+    });
+    devices = data.devices || devices;
+    if (Object.prototype.hasOwnProperty.call(patch, "monitorAlways") && !patch.monitorAlways && activeDeviceId === device.id && viewerHidden) {
+      closeScreen(true);
+      return;
+    }
+    renderDevices();
+    if (activeDeviceId) syncActiveDeviceState();
+  } catch (error) {
+    bindHint.textContent = errorText(error.data || { error: error.message });
+    renderDevices();
   }
 }
 
@@ -487,8 +554,23 @@ function errorText(msg) {
 }
 
 function startControl(id) {
-  activeDeviceId = id.trim().toUpperCase();
-  const device = devices.find((item) => item.id === activeDeviceId);
+  const nextDeviceId = id.trim().toUpperCase();
+  const previousDeviceId = activeDeviceId;
+  const previousSessionId = sessionId;
+  const device = devices.find((item) => item.id === nextDeviceId);
+  if (screenOpen && viewerHidden && previousSessionId && previousDeviceId === nextDeviceId) {
+    openScreen();
+    if (device) setActiveDevice(device);
+    setInputReady(canControlDevice(device));
+    stopBtn.disabled = false;
+    canvas.focus({ preventScroll: true });
+    return;
+  }
+  if (previousSessionId && previousDeviceId && previousDeviceId !== nextDeviceId && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop-control", sessionId: previousSessionId }));
+    sessionId = "";
+  }
+  activeDeviceId = nextDeviceId;
   openScreen();
   viewer.classList.remove("has-frame");
   frameDrawSerial += 1;
@@ -501,6 +583,38 @@ function startControl(id) {
   }
   activeMeta.textContent = "正在请求控制";
   ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+}
+
+function escapeAttr(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function isViewerFullscreen() {
+  return document.fullscreenElement === viewerWrap;
+}
+
+async function toggleViewerFullscreen() {
+  if (!screenOpen || viewerWrap.classList.contains("closed")) return;
+  if (isViewerFullscreen()) {
+    await document.exitFullscreen().catch(() => {});
+  } else {
+    await viewerWrap.requestFullscreen().catch(() => {});
+  }
+  fullscreenBtn.textContent = isViewerFullscreen() ? "恢复" : "全屏";
+  canvas.focus({ preventScroll: true });
 }
 
 function drawFrame(msg) {
@@ -605,7 +719,7 @@ function hideRemoteCursor() {
 }
 
 function sendInput(payload) {
-  if (!screenOpen || !sessionId || !inputReady || !ws || ws.readyState !== WebSocket.OPEN) {
+  if (!screenOpen || viewerHidden || !sessionId || !inputReady || !ws || ws.readyState !== WebSocket.OPEN) {
     if (screenOpen && !sessionId) resumeActiveControl();
     if (sessionId && !inputReady) {
       const activeDevice = devices.find((item) => item.id === activeDeviceId);
@@ -645,7 +759,7 @@ function keyModifiers(event) {
 }
 
 function shouldForwardKeyboard(event) {
-  if (!screenOpen || !sessionId || !inputReady) return false;
+  if (!screenOpen || viewerHidden || !sessionId || !inputReady) return false;
   if (isTypingTarget(event.target)) return false;
   return true;
 }
@@ -683,7 +797,23 @@ authForm.addEventListener("submit", async (event) => {
 loginModeBtn.addEventListener("click", () => setAuthMode("login"));
 registerModeBtn.addEventListener("click", () => setAuthMode("register"));
 
+accountMenuBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const nextOpen = accountDropdown.classList.contains("hidden");
+  accountDropdown.classList.toggle("hidden", !nextOpen);
+  accountMenuBtn.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+});
+
+document.addEventListener("click", (event) => {
+  if (accountDropdown.classList.contains("hidden")) return;
+  if (accountDropdown.contains(event.target) || accountMenuBtn.contains(event.target)) return;
+  accountDropdown.classList.add("hidden");
+  accountMenuBtn.setAttribute("aria-expanded", "false");
+});
+
 logoutBtn.addEventListener("click", async () => {
+  accountDropdown.classList.add("hidden");
+  accountMenuBtn.setAttribute("aria-expanded", "false");
   try {
     if (sessionToken) await api("/api/auth/logout", { method: "POST" });
   } catch {
@@ -697,6 +827,7 @@ logoutBtn.addEventListener("click", async () => {
   closeScreen(false);
   setAuthMode("login");
   setUser(null);
+  showLogin("请先登录");
 });
 
 addForm.addEventListener("submit", async (event) => {
@@ -751,7 +882,7 @@ fileTransferForm.addEventListener("submit", async (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (!sessionId || frameSize.width === 0) return;
+  if (viewerHidden || !sessionId || frameSize.width === 0) return;
   event.preventDefault();
   canvas.focus({ preventScroll: true });
   canvas.setPointerCapture(event.pointerId);
@@ -867,6 +998,7 @@ canvas.addEventListener("contextmenu", (event) => {
 });
 
 canvas.addEventListener("wheel", (event) => {
+  if (viewerHidden) return;
   const activeDevice = devices.find((item) => item.id === activeDeviceId);
   if (!isDesktopDevice(activeDevice)) return;
   event.preventDefault();
@@ -881,6 +1013,10 @@ canvas.addEventListener("wheel", (event) => {
 }, { passive: false });
 
 closeScreenBtn.addEventListener("click", () => closeScreen(true));
+fullscreenBtn.addEventListener("click", toggleViewerFullscreen);
+document.addEventListener("fullscreenchange", () => {
+  fullscreenBtn.textContent = isViewerFullscreen() ? "恢复" : "全屏";
+});
 backBtn.addEventListener("click", () => sendInput({ action: "back" }));
 homeBtn.addEventListener("click", () => sendInput({ action: "home" }));
 homeSwipeBtn.addEventListener("click", () => {

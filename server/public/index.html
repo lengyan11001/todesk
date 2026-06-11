@@ -32,12 +32,6 @@
         <div id="authHint" class="hint">注册后需要管理员审核，通过后才能进入控制台。</div>
       </section>
 
-      <div class="login-links">
-        <a href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
-        <a href="/downloads/BHZN-ToDesk-Agent-Setup.exe">下载 Windows 安装包</a>
-        <a href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测安装包</a>
-        <a href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
-      </div>
     </section>
   </main>
 
@@ -50,19 +44,6 @@
           <p>设备控制台</p>
         </div>
       </div>
-
-      <section id="accountPanel" class="panel-section">
-        <div class="section-title">当前账号</div>
-        <div class="account-card">
-          <strong id="accountName">-</strong>
-          <span id="accountStatus">-</span>
-        </div>
-        <button id="logoutBtn" class="secondary-btn" type="button">退出登录</button>
-      </section>
-
-      <a class="download-link" href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
-      <a class="download-link desktop-download" href="/downloads/BHZN-ToDesk-Agent-Setup.exe">下载 Windows 安装包</a>
-      <a class="download-link desktop-download" href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测安装包</a>
 
       <section id="bindPanel" class="panel-section">
         <div class="section-title">添加设备</div>
@@ -89,7 +70,6 @@
         <div id="fileTransferLog" class="file-transfer-log"></div>
       </section>
 
-      <a class="cms-link" href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
     </aside>
 
     <section class="stage">
@@ -97,6 +77,22 @@
         <div>
           <div id="activeTitle" class="active-title">未打开屏幕</div>
           <div id="activeMeta" class="active-meta">点击下方设备入口，打开对应设备屏幕。</div>
+        </div>
+        <div class="account-menu">
+          <button id="accountMenuBtn" class="avatar-button" type="button" aria-haspopup="true" aria-expanded="false">
+            <span id="avatarInitial">-</span>
+          </button>
+          <div id="accountDropdown" class="account-dropdown hidden">
+            <div class="account-summary">
+              <strong id="accountName">-</strong>
+              <span id="accountStatus">-</span>
+            </div>
+            <a href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
+            <a href="/downloads/BHZN-ToDesk-Agent-Setup.exe">下载 Windows 安装包</a>
+            <a href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测包</a>
+            <a href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
+            <button id="logoutBtn" class="menu-danger" type="button">退出登录</button>
+          </div>
         </div>
       </header>
 
@@ -114,6 +110,7 @@
             </div>
             <div class="screen-actions">
               <button id="closeScreenBtn" type="button">关闭屏幕</button>
+              <button id="fullscreenBtn" type="button">全屏</button>
               <button id="backBtn" type="button" disabled>返回</button>
               <button id="homeBtn" type="button" disabled>Home</button>
               <button id="homeSwipeBtn" type="button" disabled>上滑返回</button>

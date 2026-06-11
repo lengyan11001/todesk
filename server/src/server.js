@@ -486,6 +486,7 @@ function bindingView(binding) {
     ...base,
     bindingId: binding.id,
     label: binding.label || base.name || defaultDeviceName(base.platform),
+    monitorAlways: Boolean(binding.monitorAlways),
     addedAt: binding.createdAt,
     boundAt: binding.createdAt,
     lastSeen: live ? live.lastSeen : (binding.lastSeen || base.lastSeen || null)
@@ -786,6 +787,7 @@ app.post("/api/bindings", requireApprovedUser, (req, res) => {
       userId: req.auth.user.id,
       deviceId,
       label: device.name || "Android Device",
+      monitorAlways: false,
       createdAt: iso()
     };
     state.bindings.push(binding);
@@ -817,6 +819,26 @@ app.delete("/api/bindings/:id", requireApprovedUser, (req, res) => {
   broadcastUser(req.auth.user.id);
   broadcastDeviceOwners(binding.deviceId);
   res.json({ ok: true, devices: listBoundDevices(req.auth.user.id) });
+});
+
+app.patch("/api/bindings/:id", requireApprovedUser, (req, res) => {
+  const binding = state.bindings.find((item) => item.userId === req.auth.user.id && item.id === req.params.id);
+  if (!binding) {
+    res.status(404).json({ error: "binding_not_found" });
+    return;
+  }
+  const body = req.body || {};
+  if (Object.prototype.hasOwnProperty.call(body, "label")) {
+    const label = String(body.label || "").trim().slice(0, 40);
+    binding.label = label || (binding.lastDevice?.name || defaultDeviceName(binding.lastDevice?.platform));
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "monitorAlways")) {
+    binding.monitorAlways = Boolean(body.monitorAlways);
+  }
+  binding.updatedAt = iso();
+  saveState();
+  broadcastUser(req.auth.user.id);
+  res.json({ ok: true, device: bindingView(binding), devices: listBoundDevices(req.auth.user.id) });
 });
 
 app.post("/api/control/:id", requireApprovedUser, (req, res) => {
