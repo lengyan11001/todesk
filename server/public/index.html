@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BHZN 远程设备控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="loginView" class="login-view">
+    <section class="login-card">
+      <div class="brand login-brand">
+        <div class="mark">BH</div>
+        <div>
+          <h1>BHZN 远程设备</h1>
+          <p id="serverState">请先登录</p>
+        </div>
+      </div>
+
+      <section id="authPanel" class="panel-section">
+        <div class="segmented">
+          <button id="loginModeBtn" type="button" class="seg active">登录</button>
+          <button id="registerModeBtn" type="button" class="seg">注册</button>
+        </div>
+        <form id="authForm" class="stack-form">
+          <label for="usernameInput">用户名</label>
+          <input id="usernameInput" autocomplete="username" placeholder="请输入用户名">
+          <label for="passwordInput">密码</label>
+          <input id="passwordInput" autocomplete="current-password" type="password" placeholder="不少于 6 位">
+          <button id="authSubmitBtn" type="submit">登录</button>
+        </form>
+        <div id="authHint" class="hint">注册后需要管理员审核，通过后才能进入控制台。</div>
+      </section>
+
+      <div class="login-links">
+        <a href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
+        <a href="/downloads/BHZN-ToDesk-Agent.exe">下载 Windows Agent</a>
+        <a href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测安装包</a>
+        <a href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
+      </div>
+    </section>
+  </main>
+
+  <main id="appShell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">BH</div>
+        <div>
+          <h1>远程设备</h1>
+          <p>设备控制台</p>
+        </div>
+      </div>
+
+      <section id="accountPanel" class="panel-section">
+        <div class="section-title">当前账号</div>
+        <div class="account-card">
+          <strong id="accountName">-</strong>
+          <span id="accountStatus">-</span>
+        </div>
+        <button id="logoutBtn" class="secondary-btn" type="button">退出登录</button>
+      </section>
+
+      <a class="download-link" href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
+      <a class="download-link desktop-download" href="/downloads/BHZN-ToDesk-Agent.exe">下载 Windows Agent</a>
+      <a class="download-link desktop-download" href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测安装包</a>
+
+      <section id="bindPanel" class="panel-section">
+        <div class="section-title">添加设备</div>
+        <form id="addForm" class="stack-form">
+          <label for="deviceIdInput">设备 ID</label>
+          <input id="deviceIdInput" autocomplete="off" placeholder="例如 8392-5714">
+          <label for="deviceCodeInput">设备验证码</label>
+          <input id="deviceCodeInput" autocomplete="off" inputmode="numeric" placeholder="设备端显示的验证码">
+          <button type="submit">匹配并添加</button>
+        </form>
+        <div id="bindHint" class="hint">只有设备 ID 和验证码同时匹配，才会保存到你的设备记录。</div>
+      </section>
+
+      <a class="cms-link" href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
+    </aside>
+
+    <section class="stage">
+      <header class="toolbar">
+        <div>
+          <div id="activeTitle" class="active-title">未打开屏幕</div>
+          <div id="activeMeta" class="active-meta">点击下方设备入口，打开对应设备屏幕。</div>
+        </div>
+      </header>
+
+      <div class="stage-body">
+        <div id="deviceShelf" class="device-shelf"></div>
+
+        <div id="screenWorkspace" class="screen-workspace">
+          <div id="viewerWrap" class="viewer-wrap closed">
+            <div id="viewer" class="viewer">
+              <canvas id="screenCanvas" width="360" height="720" tabindex="0"></canvas>
+              <div id="emptyState" class="empty-state">
+                <strong>等待设备画面</strong>
+                <span>选择已绑定且在线的设备后，设备画面会显示在这里。</span>
+              </div>
+            </div>
+            <div class="screen-actions">
+              <button id="closeScreenBtn" type="button">关闭屏幕</button>
+              <button id="backBtn" type="button" disabled>返回</button>
+              <button id="homeBtn" type="button" disabled>Home</button>
+              <button id="homeSwipeBtn" type="button" disabled>上滑返回</button>
+              <button id="stopBtn" class="danger-small" type="button" disabled>停止控制</button>
+            </div>
+          </div>
+          <div id="screenPlaceholder" class="screen-placeholder">
+            <strong>未打开设备屏幕</strong>
+            <span>点击上方任意已添加设备，即可展示该设备屏幕。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

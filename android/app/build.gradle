@@ -1,0 +1,19 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "top.bhzn.todesk"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "top.bhzn.todesk"
+        minSdk 26
+        targetSdk 34
+        versionCode 2
+        versionName "0.1.1"
+    }
+}
+
+dependencies {
+}

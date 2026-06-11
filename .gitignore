@@ -1,0 +1,67 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Logs
+*.log
+*.out
+*.err
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.mobileprovision
+*.keystore
+*.jks
+
+# Node
+server/node_modules/
+npm-debug.log*
+
+# Python desktop agent
+desktop-agent/.venv/
+desktop-agent/.build-venv-macos/
+desktop-agent/__pycache__/
+desktop-agent/build/
+desktop-agent/dist/
+desktop-agent/dist-macos-unsigned/
+desktop-agent/dist-macos-app/
+desktop-agent/*.spec
+
+# Rust desktop agent
+desktop-agent-rs/target/
+desktop-agent-rs/*.log
+desktop-agent-rs/test-agent.json
+
+# Android build output and signing material
+android/.gradle/
+android/app/build/
+android/build/
+android/manual-build/
+android/keystore/
+*.apk
+*.aab
+*.idsig
+
+# Download/release artifacts
+server/public/downloads/
+deploy-*.zip
+bhzn-todesk-server.zip
+*.exe
+*.dmg
+*.pkg
+
+# Local verification artifacts
+_mac_pkg_check/
+*.png
+*.jpg
+*.jpeg
+
+# Accidental scratch files
+({text

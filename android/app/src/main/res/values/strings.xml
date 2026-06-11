@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">BHZN ToDesk</string>
+    <string name="input_service_label">BHZN ToDesk 输入控制</string>
+    <string name="input_service_description">允许已授权的远程控制会话点击、滑动和执行返回/主页操作。</string>
+</resources>

@@ -1,0 +1,58 @@
+# BHZN ToDesk
+
+独立远程控制产品雏形，包含服务端/H5、Android 被控端、Windows/macOS 桌面被控端。
+
+## 目录
+
+- `server/`: Node.js 设备中继、H5 控制台、CMS 审核后台，默认端口 `38080`。
+- `android/`: Android APK，展示设备 ID/验证码，申请录屏和无障碍控制权限。
+- `desktop-agent/`: Windows/macOS 桌面 Agent，接入同一套设备 ID、验证码、H5 控制流程。
+
+默认线上地址：`https://todesk.bhzn.top`
+
+## 当前包
+
+- Android APK: `E:\BHZN-ToDesk\android\manual-build\out\bhzn-todesk-debug.apk`
+- H5 Android 下载副本: `E:\BHZN-ToDesk\server\public\downloads\bhzn-todesk-debug.apk`
+- Windows Agent: `E:\BHZN-ToDesk\desktop-agent\dist\BHZN-ToDesk-Agent.exe`
+- H5 Windows 下载副本: `E:\BHZN-ToDesk\server\public\downloads\BHZN-ToDesk-Agent.exe`
+- macOS Agent 无签名内测包: `E:\BHZN-ToDesk\server\public\downloads\BHZN-ToDesk-Agent-mac.zip`
+
+## Android 打包
+
+```powershell
+cd E:\BHZN-ToDesk\android
+powershell -ExecutionPolicy Bypass -File .\build-apk.ps1
+```
+
+## Windows Agent 运行
+
+```powershell
+cd E:\BHZN-ToDesk\desktop-agent
+powershell -ExecutionPolicy Bypass -File .\run-windows.ps1
+```
+
+## Windows Agent 打包
+
+```powershell
+cd E:\BHZN-ToDesk\desktop-agent
+powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
+```
+
+输出：`E:\BHZN-ToDesk\desktop-agent\dist\BHZN-ToDesk-Agent.exe`
+
+## macOS Agent 无开发者账号内测安装
+
+```bash
+unzip BHZN-ToDesk-Agent-mac.zip
+cd BHZN-ToDesk-Agent-mac
+bash install-macos.sh
+```
+
+macOS 首次运行后，需要在系统设置里给 Terminal 或 Python 授权：
+
+- Screen Recording
+- Accessibility
+- Input Monitoring
+
+授权完成后重启 Agent，再在 H5 输入设备 ID 和验证码绑定。
