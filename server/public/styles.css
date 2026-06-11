@@ -23,7 +23,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -188,6 +189,28 @@ input:focus {
   border-color: var(--accent);
 }
 
+select {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #fff;
+  color: var(--text);
+  outline: none;
+}
+
+select:focus {
+  border-color: var(--accent);
+}
+
+input[type="file"] {
+  height: auto;
+  min-height: 38px;
+  padding: 7px 10px;
+  background: #fff;
+}
+
 .hint {
   color: var(--muted);
   font-size: 13px;
@@ -205,6 +228,46 @@ input:focus {
 .account-card span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.file-transfer-log {
+  display: grid;
+  gap: 8px;
+  max-height: 146px;
+  overflow: auto;
+}
+
+.file-transfer-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #f8fafc;
+  display: grid;
+  gap: 3px;
+}
+
+.file-transfer-row strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-transfer-row span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.file-transfer-row.saved {
+  border-color: #b9e6c9;
+  background: #f0fbf4;
+}
+
+.file-transfer-row.failed {
+  border-color: #f0c5c5;
+  background: #fff5f5;
 }
 
 .secondary-btn {

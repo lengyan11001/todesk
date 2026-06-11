@@ -76,6 +76,19 @@
         <div id="bindHint" class="hint">只有设备 ID 和验证码同时匹配，才会保存到你的设备记录。</div>
       </section>
 
+      <section id="filePanel" class="panel-section">
+        <div class="section-title">文件下发</div>
+        <form id="fileTransferForm" class="stack-form">
+          <label for="fileDeviceSelect">目标设备</label>
+          <select id="fileDeviceSelect"></select>
+          <label for="fileInput">选择文件</label>
+          <input id="fileInput" type="file">
+          <button id="fileSubmitBtn" type="submit">上传并下发</button>
+        </form>
+        <div id="fileHint" class="hint">文件会保存到设备端下载目录，不会自动打开或执行。</div>
+        <div id="fileTransferLog" class="file-transfer-log"></div>
+      </section>
+
       <a class="cms-link" href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
     </aside>
 

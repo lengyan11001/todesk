@@ -1,5 +1,6 @@
 mod capture;
 mod config;
+mod file_transfer;
 #[cfg(windows)]
 mod gui;
 mod input;
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.4-rs";
+const AGENT_VERSION: &str = "0.2.5-rs";
 const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FAST_FRAME_MS: u64 = 900;
@@ -241,6 +242,15 @@ async fn run_once(config: AgentConfig) -> Result<()> {
             ServerEvent::StopControl { .. } => log::info("stop-control received"),
             ServerEvent::ControlRequest { .. } => log::info("control-request received"),
             ServerEvent::Hello { .. } => log::info("hello received from server"),
+            ServerEvent::FileTransfer(request) => {
+                log::info(format!("file-transfer received id={} name={} bytes={}", request.transfer_id, request.file_name, request.size));
+                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(file_transfer::downloading_status(&request))));
+                let status_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    let status = file_transfer::receive(request).await;
+                    let _ = status_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(status)));
+                });
+            }
             ServerEvent::Other => {}
         }
     }

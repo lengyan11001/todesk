@@ -438,6 +438,36 @@ public class RemoteService extends Service {
             sendStatus();
         } else if ("stop-control".equals(type)) {
             sendStatus();
+        } else if ("file-transfer".equals(type)) {
+            handleFileTransfer(msg);
+        }
+    }
+
+    private void handleFileTransfer(final JSONObject msg) {
+        final String transferId = msg.optString("transferId");
+        final String fileName = msg.optString("fileName", "file.bin");
+        final long size = msg.optLong("size", 0);
+        final String sha256 = msg.optString("sha256");
+        final String url = msg.optString("url");
+        FileTransferReceiver.receive(this, transferId, fileName, size, sha256, url, new FileTransferReceiver.Callback() {
+            @Override
+            public void onStatus(String status, String path, long bytes, String error) {
+                sendFileTransferStatus(transferId, status, path, bytes, error);
+            }
+        });
+    }
+
+    private void sendFileTransferStatus(String transferId, String status, String path, long bytes, String error) {
+        JSONObject msg = JsonUtil.object();
+        JsonUtil.put(msg, "type", "file-transfer-status");
+        JsonUtil.put(msg, "transferId", transferId);
+        JsonUtil.put(msg, "status", status);
+        JsonUtil.put(msg, "path", path == null ? "" : path);
+        JsonUtil.put(msg, "bytes", bytes);
+        JsonUtil.put(msg, "error", error == null ? "" : error);
+        SimpleWebSocket socket = webSocket;
+        if (socket != null) {
+            socket.send(msg.toString());
         }
     }
 

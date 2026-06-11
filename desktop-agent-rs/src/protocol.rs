@@ -7,6 +7,8 @@ use crate::{capture::CaptureState, config::AgentConfig};
 pub enum ClientEvent {
     HelloDevice(DeviceStatus),
     Heartbeat(DeviceStatus),
+    #[serde(rename = "file-transfer-status")]
+    FileTransferStatus(FileTransferStatus),
 }
 
 #[derive(Debug, Serialize)]
@@ -93,8 +95,30 @@ pub enum ServerEvent {
     StopControl { #[serde(rename = "sessionId")] _session_id: Option<String> },
     #[serde(rename = "hello")]
     Hello { _role: Option<String>, _id: Option<String> },
+    #[serde(rename = "file-transfer")]
+    FileTransfer(FileTransferRequest),
     #[serde(other)]
     Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferRequest {
+    pub transfer_id: String,
+    pub file_name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferStatus {
+    pub transfer_id: String,
+    pub status: String,
+    pub path: String,
+    pub bytes: u64,
+    pub error: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -20,8 +20,11 @@ const BINARY_FRAME_HEADER_LIMIT = 64 * 1024;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const DEFAULT_ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026";
-const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.4-rs";
+const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.5-rs";
 const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
+const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 100 * 1024 * 1024);
+const FILE_TRANSFER_TTL_MS = Number(process.env.FILE_TRANSFER_TTL_MS || 24 * 60 * 60 * 1000);
+const FILE_TRANSFER_DIR = path.join(DATA_DIR, "file-transfers");
 
 process.on("uncaughtException", (error) => {
   const code = error?.code || "";
@@ -62,6 +65,7 @@ const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 25 * 1024 * 1
 const devices = new Map();
 const clients = new Set();
 const controllers = new Map();
+const fileTransfers = new Map();
 let state = loadState();
 
 function now() {
@@ -148,6 +152,64 @@ function publicBaseUrl(req) {
   const proto = String(req.get("x-forwarded-proto") || req.protocol || "https").split(",")[0].trim();
   const host = req.get("host");
   return `${proto}://${host}`;
+}
+
+function decodeHeaderValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function safeFileName(value) {
+  const base = path.basename(decodeHeaderValue(value) || "file.bin");
+  const clean = base.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").trim().slice(0, 180);
+  return clean || "file.bin";
+}
+
+function transferView(transfer) {
+  return {
+    id: transfer.id,
+    deviceId: transfer.deviceId,
+    fileName: transfer.fileName,
+    size: transfer.size,
+    sha256: transfer.sha256,
+    status: transfer.status,
+    error: transfer.error || "",
+    devicePath: transfer.devicePath || "",
+    bytes: transfer.bytes || 0,
+    createdAt: transfer.createdAt,
+    updatedAt: transfer.updatedAt || transfer.createdAt,
+    completedAt: transfer.completedAt || null,
+    expiresAt: transfer.expiresAt
+  };
+}
+
+function notifyFileTransfer(transfer) {
+  const payload = { type: "file-transfer", transfer: transferView(transfer) };
+  for (const ws of clients) {
+    if (ws.userId === transfer.userId) {
+      send(ws, payload);
+    }
+  }
+}
+
+function pruneFileTransfers() {
+  const cutoff = now();
+  for (const [id, transfer] of fileTransfers) {
+    if (Number(transfer.expiresAt || 0) > cutoff) continue;
+    fileTransfers.delete(id);
+    if (transfer.path) {
+      try {
+        fs.rmSync(transfer.path, { force: true });
+      } catch {
+        // Best effort cleanup.
+      }
+    }
+  }
 }
 
 function loadState() {
@@ -776,6 +838,96 @@ app.post("/api/control/:id", requireApprovedUser, (req, res) => {
   res.json({ ok: true, device: deviceView(device) });
 });
 
+app.post("/api/file-transfers", requireApprovedUser, express.raw({
+  type: "application/octet-stream",
+  limit: FILE_TRANSFER_MAX_BYTES
+}), (req, res) => {
+  pruneFileTransfers();
+  const deviceId = normalizeDeviceId(req.get("x-device-id"));
+  const binding = findBinding(req.auth.user.id, deviceId);
+  const device = devices.get(deviceId);
+  if (!binding) {
+    res.status(403).json({ error: "device_not_bound" });
+    return;
+  }
+  if (!device || device.ws.readyState !== WebSocket.OPEN) {
+    res.status(404).json({ error: "device_offline", device: bindingView(binding) });
+    return;
+  }
+  if (!Buffer.isBuffer(req.body) || req.body.length < 1) {
+    res.status(400).json({ error: "empty_file" });
+    return;
+  }
+  if (req.body.length > FILE_TRANSFER_MAX_BYTES) {
+    res.status(413).json({ error: "file_too_large" });
+    return;
+  }
+
+  const transferId = makeId("file");
+  const token = crypto.randomBytes(32).toString("base64url");
+  const fileName = safeFileName(req.get("x-file-name"));
+  const sha256 = crypto.createHash("sha256").update(req.body).digest("hex");
+  const dir = path.join(FILE_TRANSFER_DIR, transferId);
+  const filePath = path.join(dir, fileName);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, req.body);
+
+  const transfer = {
+    id: transferId,
+    userId: req.auth.user.id,
+    deviceId,
+    tokenHash: hashToken(token),
+    fileName,
+    size: req.body.length,
+    sha256,
+    path: filePath,
+    status: "queued",
+    createdAt: iso(),
+    updatedAt: iso(),
+    expiresAt: now() + FILE_TRANSFER_TTL_MS
+  };
+  fileTransfers.set(transferId, transfer);
+
+  send(device.ws, {
+    type: "file-transfer",
+    transferId,
+    fileName,
+    size: transfer.size,
+    sha256,
+    url: `${publicBaseUrl(req)}/api/file-transfers/${encodeURIComponent(transferId)}/download?token=${encodeURIComponent(token)}`
+  });
+  transfer.status = "dispatched";
+  transfer.updatedAt = iso();
+  notifyFileTransfer(transfer);
+  relayLog("file.transfer.dispatched", {
+    transferId,
+    userId: req.auth.user.id,
+    deviceId,
+    size: transfer.size,
+    fileName
+  });
+  res.status(201).json({ ok: true, transfer: transferView(transfer) });
+});
+
+app.get("/api/file-transfers/:id/download", (req, res) => {
+  pruneFileTransfers();
+  const transfer = fileTransfers.get(String(req.params.id || ""));
+  const token = String(req.query.token || "");
+  if (!transfer || !token || transfer.tokenHash !== hashToken(token)) {
+    res.status(404).json({ error: "transfer_not_found" });
+    return;
+  }
+  if (!fs.existsSync(transfer.path)) {
+    res.status(410).json({ error: "transfer_expired" });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Content-Length", String(transfer.size));
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(transfer.fileName)}`);
+  fs.createReadStream(transfer.path).pipe(res);
+});
+
 app.get("/api/admin/users", requireAdmin, (req, res) => {
   res.json({
     users: state.users
@@ -970,6 +1122,31 @@ wss.on("connection", (ws) => {
           notifyDevice: false,
           broadcast: true
         });
+        return;
+      }
+
+      if (msg.type === "file-transfer-status") {
+        const transfer = fileTransfers.get(String(msg.transferId || ""));
+        if (!transfer || transfer.deviceId !== ws.deviceId) return;
+        const status = String(msg.status || "");
+        if (!["downloading", "saved", "failed"].includes(status)) return;
+        transfer.status = status;
+        transfer.updatedAt = iso();
+        transfer.error = String(msg.error || "").slice(0, 400);
+        transfer.devicePath = String(msg.path || "").slice(0, 500);
+        transfer.bytes = Math.max(0, Number(msg.bytes || 0));
+        if (status === "saved" || status === "failed") {
+          transfer.completedAt = iso();
+        }
+        notifyFileTransfer(transfer);
+        relayLog("file.transfer.status", {
+          transferId: transfer.id,
+          deviceId: ws.deviceId,
+          status,
+          bytes: transfer.bytes,
+          error: transfer.error
+        });
+        return;
       }
       return;
     }
@@ -1108,6 +1285,7 @@ setInterval(() => {
   for (const deviceId of removed) {
     broadcastDeviceOwners(deviceId);
   }
+  pruneFileTransfers();
 }, WS_PING_INTERVAL_MS).unref();
 
 server.listen(PORT, HOST, () => {

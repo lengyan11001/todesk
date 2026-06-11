@@ -15,6 +15,12 @@ const addForm = document.getElementById("addForm");
 const deviceIdInput = document.getElementById("deviceIdInput");
 const deviceCodeInput = document.getElementById("deviceCodeInput");
 const bindHint = document.getElementById("bindHint");
+const fileTransferForm = document.getElementById("fileTransferForm");
+const fileDeviceSelect = document.getElementById("fileDeviceSelect");
+const fileInput = document.getElementById("fileInput");
+const fileSubmitBtn = document.getElementById("fileSubmitBtn");
+const fileHint = document.getElementById("fileHint");
+const fileTransferLog = document.getElementById("fileTransferLog");
 const deviceShelf = document.getElementById("deviceShelf");
 const activeTitle = document.getElementById("activeTitle");
 const activeMeta = document.getElementById("activeMeta");
@@ -56,6 +62,7 @@ let pendingText = "";
 let pendingTextTimer = 0;
 let frameDrawSerial = 0;
 let lastFrameTimestamp = 0;
+let fileTransfers = [];
 
 function devicePlatform(device) {
   return String(device?.platform || "android").toLowerCase();
@@ -110,6 +117,23 @@ async function api(path, options = {}) {
     ...options,
     headers,
     body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || `http_${response.status}`);
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+async function apiRaw(path, body, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
+  const response = await fetch(path, {
+    method: options.method || "POST",
+    headers,
+    body
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -214,6 +238,9 @@ function connect() {
       renderDevices();
       resumeActiveControl();
     }
+    if (msg.type === "file-transfer" && msg.transfer) {
+      upsertFileTransfer(msg.transfer);
+    }
     if (msg.type === "control-ready") {
       sessionId = msg.sessionId;
       activeDeviceId = msg.device.id;
@@ -283,6 +310,7 @@ function resumeActiveControl() {
 
 function renderDevices() {
   if (!currentUser || currentUser.status !== "approved") return;
+  renderFileTargets();
   if (!devices.length) {
     deviceShelf.innerHTML = `<div class="placeholder-card">还没有添加设备，请输入设备 ID 和验证码匹配。</div>`;
     return;
@@ -326,6 +354,76 @@ async function deleteBinding(device) {
     renderDevices();
   } catch (error) {
     bindHint.textContent = errorText(error.data || { error: error.message });
+  }
+}
+
+function renderFileTargets() {
+  if (!fileDeviceSelect) return;
+  const selected = fileDeviceSelect.value;
+  const onlineDevices = devices.filter((device) => device.online);
+  fileDeviceSelect.innerHTML = "";
+  if (!onlineDevices.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "没有在线设备";
+    fileDeviceSelect.appendChild(option);
+    if (fileSubmitBtn) fileSubmitBtn.disabled = true;
+    return;
+  }
+  for (const device of onlineDevices) {
+    const option = document.createElement("option");
+    option.value = device.id;
+    option.textContent = `${device.id} · ${deviceName(device)} · ${platformText(device)}`;
+    fileDeviceSelect.appendChild(option);
+  }
+  if (selected && onlineDevices.some((device) => device.id === selected)) {
+    fileDeviceSelect.value = selected;
+  } else if (activeDeviceId && onlineDevices.some((device) => device.id === activeDeviceId)) {
+    fileDeviceSelect.value = activeDeviceId;
+  }
+  if (fileSubmitBtn) fileSubmitBtn.disabled = false;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fileStatusText(status) {
+  if (status === "queued") return "已排队";
+  if (status === "dispatched") return "已派发";
+  if (status === "downloading") return "设备下载中";
+  if (status === "saved") return "已保存";
+  if (status === "failed") return "失败";
+  return status || "-";
+}
+
+function upsertFileTransfer(transfer) {
+  if (!transfer?.id) return;
+  fileTransfers = [transfer, ...fileTransfers.filter((item) => item.id !== transfer.id)].slice(0, 20);
+  renderFileTransfers();
+  if (fileHint) {
+    fileHint.textContent = `${transfer.fileName || "文件"}：${fileStatusText(transfer.status)}${transfer.error ? `，${transfer.error}` : ""}`;
+  }
+}
+
+function renderFileTransfers() {
+  if (!fileTransferLog) return;
+  fileTransferLog.innerHTML = "";
+  for (const transfer of fileTransfers) {
+    const row = document.createElement("div");
+    row.className = `file-transfer-row ${transfer.status || ""}`;
+    const title = document.createElement("strong");
+    title.textContent = transfer.fileName || "file";
+    const meta = document.createElement("span");
+    const savedText = transfer.devicePath ? ` · ${transfer.devicePath}` : "";
+    const errorTextValue = transfer.error ? ` · ${transfer.error}` : "";
+    meta.textContent = `${transfer.deviceId || "-"} · ${fileStatusText(transfer.status)} · ${formatBytes(transfer.size)}${savedText}${errorTextValue}`;
+    row.appendChild(title);
+    row.appendChild(meta);
+    fileTransferLog.appendChild(row);
   }
 }
 
@@ -382,6 +480,9 @@ function errorText(msg) {
   if (msg.error === "username_exists") return "用户名已存在";
   if (msg.error === "bad_credentials") return "用户名或密码格式不正确";
   if (msg.error === "binding_not_found") return "设备绑定记录不存在";
+  if (msg.error === "empty_file") return "请选择要下发的文件";
+  if (msg.error === "file_too_large") return "文件超过服务端限制";
+  if (msg.error === "transfer_not_found") return "文件下发任务不存在或已过期";
   return `操作失败：${msg.error}`;
 }
 
@@ -615,6 +716,37 @@ addForm.addEventListener("submit", async (event) => {
     startControl(data.device.id);
   } catch (error) {
     bindHint.textContent = errorText(error.data || { error: error.message });
+  }
+});
+
+fileTransferForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const deviceId = String(fileDeviceSelect.value || "").trim();
+  const file = fileInput.files && fileInput.files[0];
+  if (!deviceId) {
+    fileHint.textContent = "请选择在线设备";
+    return;
+  }
+  if (!file) {
+    fileHint.textContent = "请选择要下发的文件";
+    return;
+  }
+  fileSubmitBtn.disabled = true;
+  fileHint.textContent = `正在上传 ${file.name}`;
+  try {
+    const data = await apiRaw("/api/file-transfers", file, {
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-device-id": deviceId,
+        "x-file-name": encodeURIComponent(file.name)
+      }
+    });
+    upsertFileTransfer(data.transfer);
+    fileInput.value = "";
+  } catch (error) {
+    fileHint.textContent = errorText(error.data || { error: error.message });
+  } finally {
+    renderFileTargets();
   }
 });
 
