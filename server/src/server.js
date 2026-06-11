@@ -20,6 +20,8 @@ const BINARY_FRAME_HEADER_LIMIT = 64 * 1024;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const DEFAULT_ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026";
+const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.4-rs";
+const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
 
 process.on("uncaughtException", (error) => {
   const code = error?.code || "";
@@ -136,6 +138,16 @@ function encodeBinaryFrame(header, image) {
   encodedHeader.copy(payload, BINARY_FRAME_MAGIC.length + 4);
   image.copy(payload, BINARY_FRAME_MAGIC.length + 4 + encodedHeader.length);
   return payload;
+}
+
+function fileSha256(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function publicBaseUrl(req) {
+  const proto = String(req.get("x-forwarded-proto") || req.protocol || "https").split(",")[0].trim();
+  const host = req.get("host");
+  return `${proto}://${host}`;
 }
 
 function loadState() {
@@ -593,6 +605,23 @@ function handleBinaryDeviceFrame(ws, raw) {
 
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, time: new Date().toISOString(), port: PORT });
+});
+
+app.get("/api/releases/windows-agent", (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, "downloads", WINDOWS_AGENT_FILE);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: "release_not_found" });
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.json({
+    platform: "windows",
+    version: WINDOWS_AGENT_VERSION,
+    url: `${publicBaseUrl(req)}/downloads/${encodeURIComponent(WINDOWS_AGENT_FILE)}`,
+    sha256: fileSha256(filePath),
+    size: stat.size,
+    updatedAt: stat.mtime.toISOString()
+  });
 });
 
 app.post("/api/auth/register", (req, res) => {

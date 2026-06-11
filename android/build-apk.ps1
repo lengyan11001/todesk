@@ -1,6 +1,14 @@
 param(
     [string]$AndroidSdk = "D:\",
-    [string]$JavaHome = "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot"
+    [string]$JavaHome = "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot",
+    [int]$VersionCode = 3,
+    [string]$VersionName = "0.1.2",
+    [ValidateSet("debug", "release")]
+    [string]$Channel = "release",
+    [string]$Keystore = "",
+    [string]$KeyAlias = "",
+    [string]$StorePass = "",
+    [string]$KeyPass = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,8 +60,8 @@ $aaptLinkArgs = @(
     "--java", "$Build\gen",
     "--min-sdk-version", "26",
     "--target-sdk-version", "34",
-    "--version-code", "2",
-    "--version-name", "0.1.1",
+    "--version-code", "$VersionCode",
+    "--version-name", "$VersionName",
     "-o", "$Build\unsigned.apk"
 ) + $flatFiles
 Invoke-Native $Aapt2 $aaptLinkArgs
@@ -92,31 +100,48 @@ try {
     $apk.Dispose()
 }
 
-Invoke-Native $ZipAlign @("-f", "-p", "4", "$Build\with-dex.apk", "$Build\out\bhzn-todesk-unsigned-aligned.apk")
+Invoke-Native $ZipAlign @("-f", "-p", "4", "$Build\with-dex.apk", "$Build\out\bhzn-todesk-$Channel-unsigned-aligned.apk")
 
-$Keystore = Join-Path $KeystoreDir "bhzn-todesk-debug.keystore"
+if ([string]::IsNullOrWhiteSpace($Keystore)) {
+    $Keystore = Join-Path $KeystoreDir "bhzn-todesk-$Channel.keystore"
+}
+if ([string]::IsNullOrWhiteSpace($KeyAlias)) {
+    $KeyAlias = if ($Channel -eq "release") { "bhzn-todesk-release" } else { "androiddebugkey" }
+}
+if ([string]::IsNullOrWhiteSpace($StorePass)) {
+    $StorePass = if ($Channel -eq "release") { $env:BHZN_ANDROID_STORE_PASS } else { "android" }
+}
+if ([string]::IsNullOrWhiteSpace($KeyPass)) {
+    $KeyPass = if ($Channel -eq "release") { $env:BHZN_ANDROID_KEY_PASS } else { "android" }
+}
+if ([string]::IsNullOrWhiteSpace($StorePass) -or [string]::IsNullOrWhiteSpace($KeyPass)) {
+    throw "Set BHZN_ANDROID_STORE_PASS and BHZN_ANDROID_KEY_PASS for release signing."
+}
+
 if (!(Test-Path $Keystore)) {
     Invoke-Native $Keytool @(
         "-genkeypair",
         "-keystore", $Keystore,
-        "-storepass", "android",
-        "-keypass", "android",
-        "-alias", "androiddebugkey",
+        "-storepass", $StorePass,
+        "-keypass", $KeyPass,
+        "-alias", $KeyAlias,
         "-keyalg", "RSA",
-        "-keysize", "2048",
-        "-validity", "10000",
-        "-dname", "CN=BHZN ToDesk Debug,O=BHZN,C=CN"
+        "-keysize", "4096",
+        "-validity", "36500",
+        "-dname", "CN=BHZN ToDesk,O=BHZN,C=CN"
     )
 }
 
+$SignedApk = "$Build\out\bhzn-todesk-$Channel-v$VersionName-$VersionCode.apk"
 Invoke-Native $ApkSigner @(
     "sign",
     "--ks", $Keystore,
-    "--ks-pass", "pass:android",
-    "--key-pass", "pass:android",
-    "--out", "$Build\out\bhzn-todesk-debug.apk",
-    "$Build\out\bhzn-todesk-unsigned-aligned.apk"
+    "--ks-key-alias", $KeyAlias,
+    "--ks-pass", "pass:$StorePass",
+    "--key-pass", "pass:$KeyPass",
+    "--out", $SignedApk,
+    "$Build\out\bhzn-todesk-$Channel-unsigned-aligned.apk"
 )
 
-Invoke-Native $ApkSigner @("verify", "$Build\out\bhzn-todesk-debug.apk")
-Write-Output "$Build\out\bhzn-todesk-debug.apk"
+Invoke-Native $ApkSigner @("verify", "--verbose", $SignedApk)
+Write-Output $SignedApk

@@ -26,7 +26,7 @@ final class AppPrefs {
 
     static String deviceId(Context context) {
         SharedPreferences prefs = prefs(context);
-        String current = prefs.getString(KEY_DEVICE_ID, null);
+        String current = SecurePrefs.getString(context, prefs, KEY_DEVICE_ID, null);
         if (current != null && !current.isEmpty()) {
             return current;
         }
@@ -39,34 +39,35 @@ final class AppPrefs {
         if (id.length() > 8) {
             id = id.substring(0, 4) + "-" + id.substring(4, 8);
         }
-        prefs.edit().putString(KEY_DEVICE_ID, id).apply();
+        SecurePrefs.putString(context, prefs, KEY_DEVICE_ID, id);
         return id;
     }
 
     static String deviceCode(Context context) {
         SharedPreferences prefs = prefs(context);
-        String current = prefs.getString(KEY_DEVICE_CODE, null);
+        String current = SecurePrefs.getString(context, prefs, KEY_DEVICE_CODE, null);
         if (current != null && current.matches("\\d{6}")) {
             return current;
         }
         String code = String.format(Locale.US, "%06d", RANDOM.nextInt(1_000_000));
-        prefs.edit().putString(KEY_DEVICE_CODE, code).apply();
+        SecurePrefs.putString(context, prefs, KEY_DEVICE_CODE, code);
         return code;
     }
 
     static String resetDeviceCode(Context context) {
         String code = String.format(Locale.US, "%06d", RANDOM.nextInt(1_000_000));
-        prefs(context).edit().putString(KEY_DEVICE_CODE, code).apply();
+        SecurePrefs.putString(context, prefs(context), KEY_DEVICE_CODE, code);
         return code;
     }
 
     static String serverUrl(Context context) {
-        String url = prefs(context).getString(KEY_SERVER_URL, BuildConfig.defaultServerUrl());
+        SharedPreferences prefs = prefs(context);
+        String url = SecurePrefs.getString(context, prefs, KEY_SERVER_URL, BuildConfig.defaultServerUrl());
         return normalizeServerUrl(url);
     }
 
     static void setServerUrl(Context context, String url) {
-        prefs(context).edit().putString(KEY_SERVER_URL, normalizeServerUrl(url)).apply();
+        SecurePrefs.putString(context, prefs(context), KEY_SERVER_URL, normalizeServerUrl(url));
     }
 
     private static String normalizeServerUrl(String url) {

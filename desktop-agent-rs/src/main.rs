@@ -3,8 +3,12 @@ mod config;
 #[cfg(windows)]
 mod gui;
 mod input;
+#[cfg(windows)]
+mod installer;
 mod log;
 mod protocol;
+mod secure;
+mod update;
 
 use std::{thread, time::Duration};
 
@@ -18,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.3-rs";
+const AGENT_VERSION: &str = "0.2.4-rs";
 const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FAST_FRAME_MS: u64 = 900;
@@ -33,10 +37,17 @@ enum OutboundEvent {
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let args: Vec<String> = std::env::args().collect();
+    if handle_maintenance_args(&args).await? {
+        return Ok(());
+    }
     let show_id = args.iter().any(|item| item == "--show-id");
+    let no_update = args.iter().any(|item| item == "--no-update");
     let config_path = arg_value(&args, "--config");
     let config = AgentConfig::load(config_path.as_deref())?;
     log::init(&config);
+    if !no_update {
+        update::spawn_auto_update(config.clone(), AGENT_VERSION);
+    }
     if show_id {
         println!("BHZN ToDesk Rust Agent {}", AGENT_VERSION);
         println!("设备 ID: {}", config.device_id);
@@ -52,6 +63,38 @@ async fn main() -> Result<()> {
     }
 
     run_forever(config).await
+}
+
+async fn handle_maintenance_args(args: &[String]) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        if installer::is_setup_invocation(args) || args.iter().any(|item| item == "--install") {
+            installer::install_self(true)?;
+            return Ok(true);
+        }
+        if args.iter().any(|item| item == "--uninstall") {
+            installer::uninstall_self()?;
+            return Ok(true);
+        }
+        if args.iter().any(|item| item == "--startup-on") {
+            let exe = installer::installed_exe_path()?;
+            installer::register_startup(&exe)?;
+            return Ok(true);
+        }
+        if args.iter().any(|item| item == "--startup-off") {
+            installer::unregister_startup()?;
+            return Ok(true);
+        }
+    }
+
+    if args.iter().any(|item| item == "--check-update") {
+        let config_path = arg_value(args, "--config");
+        let config = AgentConfig::load(config_path.as_deref())?;
+        log::init(&config);
+        update::check_and_apply(&config, AGENT_VERSION, true).await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(windows)]

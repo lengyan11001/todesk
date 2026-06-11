@@ -20,4 +20,15 @@ if (!(Test-Path $exe)) {
   throw "Build finished but exe was not found: $exe"
 }
 
+$dist = Join-Path $PSScriptRoot "dist"
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
+$agent = Join-Path $dist "BHZN-ToDesk-Agent.exe"
+$setup = Join-Path $dist "BHZN-ToDesk-Agent-Setup.exe"
+Copy-Item -LiteralPath $exe -Destination $agent -Force
+Copy-Item -LiteralPath $exe -Destination $setup -Force
+
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $agent).Hash
 Write-Host "Built: $exe"
+Write-Host "Agent: $agent"
+Write-Host "Setup: $setup"
+Write-Host "SHA256: $hash"

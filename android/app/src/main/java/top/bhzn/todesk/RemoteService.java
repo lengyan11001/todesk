@@ -387,6 +387,8 @@ public class RemoteService extends Service {
         JsonUtil.put(msg, "verificationCode", AppPrefs.deviceCode(this));
         JsonUtil.put(msg, "name", "BHZN Android");
         JsonUtil.put(msg, "model", Build.MANUFACTURER + " " + Build.MODEL);
+        JsonUtil.put(msg, "platform", "android");
+        JsonUtil.put(msg, "agentVersion", BuildConfig.VERSION_NAME);
         JsonUtil.put(msg, "androidVersion", Build.VERSION.RELEASE);
         JsonUtil.put(msg, "permissions", PermissionState.toJson(this, mediaReady));
         JsonUtil.put(msg, "controlEnabled", AppPrefs.controlEnabled(this) && mediaReady && PermissionState.isAccessibilityEnabled(this));

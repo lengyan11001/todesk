@@ -23,20 +23,53 @@ powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
 Output:
 
 ```text
-E:\BHZN-ToDesk\desktop-agent-rs\target\release\bhzn-todesk-agent-rs.exe
+E:\BHZN-ToDesk\desktop-agent-rs\dist\BHZN-ToDesk-Agent.exe
+E:\BHZN-ToDesk\desktop-agent-rs\dist\BHZN-ToDesk-Agent-Setup.exe
 ```
 
-Run with the default shared desktop-agent config:
+## Install / Startup / Update
+
+No administrator privilege or trusted certificate is required in the current internal build.
+
+Install for the current user:
 
 ```powershell
-.\target\release\bhzn-todesk-agent-rs.exe
+.\dist\BHZN-ToDesk-Agent-Setup.exe
+```
+
+Or explicitly:
+
+```powershell
+.\dist\BHZN-ToDesk-Agent.exe --install
+```
+
+The installer copies the client to `%LOCALAPPDATA%\BHZN-ToDesk\BHZN-ToDesk-Agent.exe`, registers `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and creates a user scheduled task named `BHZN-ToDesk-Agent-Update`.
+
+Manual update check:
+
+```powershell
+.\dist\BHZN-ToDesk-Agent.exe --check-update --headless --no-auto-install
+```
+
+Uninstall startup/update entries:
+
+```powershell
+.\dist\BHZN-ToDesk-Agent.exe --uninstall
+```
+
+Run with the default config:
+
+```powershell
+.\dist\BHZN-ToDesk-Agent.exe --no-update
 ```
 
 Run with a specific config file:
 
 ```powershell
-.\target\release\bhzn-todesk-agent-rs.exe --config E:\BHZN-ToDesk\desktop-agent-rs\test-agent.json
+.\dist\BHZN-ToDesk-Agent.exe --config E:\BHZN-ToDesk\desktop-agent-rs\test-agent.json --no-update
 ```
+
+Local config is stored under `%APPDATA%\BHZN-ToDesk\agent.json`. On Windows, sensitive values are saved with DPAPI protected fields.
 
 ## License Boundary
 

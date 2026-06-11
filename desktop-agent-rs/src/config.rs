@@ -6,7 +6,12 @@ use rand::{distr::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-const DEFAULT_SERVER: &str = "https://todesk.bhzn.top";
+use crate::secure;
+
+const DEFAULT_SERVER_KEY: u8 = 0x5A;
+const DEFAULT_SERVER_DATA: &[u8] = &[
+    50, 46, 46, 42, 41, 96, 117, 117, 46, 53, 62, 63, 41, 49, 116, 56, 50, 32, 52, 116, 46, 53, 42,
+];
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -24,6 +29,10 @@ struct ConfigFile {
     device_id: Option<String>,
     verification_code: Option<String>,
     name: Option<String>,
+    protected_server: Option<String>,
+    protected_device_id: Option<String>,
+    protected_verification_code: Option<String>,
+    protected_name: Option<String>,
 }
 
 impl AgentConfig {
@@ -41,10 +50,25 @@ impl AgentConfig {
 
         let config = Self {
             path,
-            server: normalize_server(file.server.as_deref().unwrap_or(DEFAULT_SERVER)),
-            device_id: normalize_device_id(file.device_id.as_deref().unwrap_or("")),
-            verification_code: normalize_code(file.verification_code.as_deref().unwrap_or("")),
-            name: file.name.unwrap_or_else(default_device_name),
+            server: normalize_server(
+                unprotect_value(file.protected_server.as_deref())
+                    .or(file.server)
+                    .unwrap_or_else(default_server_url)
+                    .as_str(),
+            ),
+            device_id: normalize_device_id(
+                unprotect_value(file.protected_device_id.as_deref())
+                    .or(file.device_id)
+                    .unwrap_or_default()
+                    .as_str(),
+            ),
+            verification_code: normalize_code(
+                unprotect_value(file.protected_verification_code.as_deref())
+                    .or(file.verification_code)
+                    .unwrap_or_default()
+                    .as_str(),
+            ),
+            name: unprotect_value(file.protected_name.as_deref()).or(file.name).unwrap_or_else(default_device_name),
         };
         config.save()?;
         Ok(config)
@@ -54,11 +78,28 @@ impl AgentConfig {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = ConfigFile {
-            server: Some(self.server.clone()),
-            device_id: Some(self.device_id.clone()),
-            verification_code: Some(self.verification_code.clone()),
-            name: Some(self.name.clone()),
+        let file = if secure::is_protection_available() {
+            ConfigFile {
+                server: None,
+                device_id: None,
+                verification_code: None,
+                name: None,
+                protected_server: protect_value(&self.server),
+                protected_device_id: protect_value(&self.device_id),
+                protected_verification_code: protect_value(&self.verification_code),
+                protected_name: protect_value(&self.name),
+            }
+        } else {
+            ConfigFile {
+                server: Some(self.server.clone()),
+                device_id: Some(self.device_id.clone()),
+                verification_code: Some(self.verification_code.clone()),
+                name: Some(self.name.clone()),
+                protected_server: None,
+                protected_device_id: None,
+                protected_verification_code: None,
+                protected_name: None,
+            }
         };
         fs::write(&self.path, serde_json::to_string_pretty(&file)?)?;
         Ok(())
@@ -84,6 +125,23 @@ impl AgentConfig {
     }
 }
 
+fn default_server_url() -> String {
+    DEFAULT_SERVER_DATA
+        .iter()
+        .map(|value| char::from(value ^ DEFAULT_SERVER_KEY))
+        .collect()
+}
+
+fn protect_value(value: &str) -> Option<String> {
+    secure::protect_to_base64(value.as_bytes()).ok()
+}
+
+fn unprotect_value(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let bytes = secure::unprotect_from_base64(value).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 fn config_path() -> Result<PathBuf> {
     if cfg!(target_os = "windows") {
         let root = std::env::var_os("APPDATA").context("APPDATA is not set")?;
@@ -96,7 +154,7 @@ fn config_path() -> Result<PathBuf> {
 fn normalize_server(value: &str) -> String {
     let trimmed = value.trim().trim_end_matches('/');
     if trimmed.is_empty() {
-        DEFAULT_SERVER.to_string()
+        default_server_url()
     } else if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
         trimmed.to_string()
     } else {
