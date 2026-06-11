@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.6-rs";
+const AGENT_VERSION: &str = "0.2.7-rs";
 const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FAST_FRAME_MS: u64 = 900;

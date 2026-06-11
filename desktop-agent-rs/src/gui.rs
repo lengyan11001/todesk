@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         OnceLock,
@@ -8,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
     FillRect, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow,
@@ -17,7 +18,11 @@ use windows::Win32::Graphics::Gdi::{
     DT_SINGLELINE, DT_TOP, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HFONT,
     HPEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
@@ -182,8 +187,12 @@ unsafe fn draw_main(hdc: HDC) {
 
     draw_round_rect(hdc, 184, 168, 724, 272, 12, CARD, CARD);
     draw_text(hdc, "设备代码", 210, 190, 310, 214, MUTED, 13, false, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    draw_round_rect(hdc, 326, 188, 386, 218, 7, 0xEEF7FF, 0xD8EAFF);
+    draw_text(hdc, "复制", 326, 191, 386, 215, BLUE_DARK, 12, true, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     draw_text(hdc, id, 210, 220, 386, 258, 0x000000, 22, true, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     draw_text(hdc, "连接模式-临时密码", 456, 190, 640, 214, MUTED, 13, false, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    draw_round_rect(hdc, 642, 188, 702, 218, 7, 0xEEF7FF, 0xD8EAFF);
+    draw_text(hdc, "复制", 642, 191, 702, 215, BLUE_DARK, 12, true, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     draw_text(hdc, code, 456, 220, 626, 258, 0x000000, 22, true, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     fill_rect(hdc, &RECT { left: 430, top: 184, right: 431, bottom: 256 }, LINE);
 
@@ -243,6 +252,21 @@ unsafe fn handle_click(hwnd: HWND, x: i32, y: i32) {
         }
     }
 
+    if ACTIVE_TAB.load(Ordering::Relaxed) == 0 {
+        if (326..=386).contains(&x) && (188..=218).contains(&y) {
+            if let Some(config) = GUI_CONFIG.get() {
+                copy_to_clipboard(hwnd, &config.device_id);
+            }
+            return;
+        }
+        if (642..=702).contains(&x) && (188..=218).contains(&y) {
+            if let Some(config) = GUI_CONFIG.get() {
+                copy_to_clipboard(hwnd, &config.verification_code);
+            }
+            return;
+        }
+    }
+
     if ACTIVE_TAB.load(Ordering::Relaxed) == 0 && (456..=562).contains(&x) && (64..=100).contains(&y) {
         ACTIVE_TAB.store(1, Ordering::Relaxed);
         refresh(hwnd);
@@ -283,6 +307,27 @@ unsafe fn open_path(hwnd: HWND, path: &str) {
     };
     let wide = wide_null(&target);
     let _ = ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOW);
+}
+
+unsafe fn copy_to_clipboard(hwnd: HWND, text: &str) {
+    const CF_UNICODETEXT_FORMAT: u32 = 13;
+
+    let wide = wide_null(text);
+    let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, wide.len() * std::mem::size_of::<u16>()) else {
+        return;
+    };
+    let locked = GlobalLock(handle) as *mut u16;
+    if locked.is_null() {
+        return;
+    }
+    ptr::copy_nonoverlapping(wide.as_ptr(), locked, wide.len());
+    let _ = GlobalUnlock(handle);
+
+    if OpenClipboard(Some(hwnd)).is_ok() {
+        let _ = EmptyClipboard();
+        let _ = SetClipboardData(CF_UNICODETEXT_FORMAT, Some(HANDLE(handle.0)));
+        let _ = CloseClipboard();
+    }
 }
 
 unsafe fn pill(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32, text: &str, active: bool) {

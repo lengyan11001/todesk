@@ -2,6 +2,9 @@ package top.bhzn.todesk;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -173,8 +176,8 @@ public class MainActivity extends Activity {
     }
 
     private void renderHome(boolean media, boolean input, boolean running, boolean server) {
-        card("本机设备 ID", AppPrefs.deviceId(this), 30, true);
-        card("设备验证码", AppPrefs.deviceCode(this), 30, true);
+        copyCard("本机设备 ID", AppPrefs.deviceId(this), "复制设备 ID");
+        copyCard("设备验证码", AppPrefs.deviceCode(this), "复制验证码");
 
         Button resetCode = dangerButton("刷新设备验证码");
         resetCode.setOnClickListener(new View.OnClickListener() {
@@ -431,6 +434,42 @@ public class MainActivity extends Activity {
         box.addView(titleView);
         box.addView(valueView);
         content.addView(box, blockParams());
+    }
+
+    private void copyCard(final String title, final String value, String buttonText) {
+        LinearLayout box = cardBox();
+        TextView titleView = smallLabel(title);
+        TextView valueView = new TextView(this);
+        valueView.setText(value);
+        valueView.setTextSize(30);
+        valueView.setTextColor(Color.rgb(23, 32, 42));
+        valueView.setPadding(0, dp(8), 0, dp(10));
+        valueView.setGravity(Gravity.START);
+        valueView.setLetterSpacing(.08f);
+        valueView.setTypeface(android.graphics.Typeface.MONOSPACE, 1);
+
+        Button copy = primaryButton(buttonText);
+        copy.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                copyText(title, value);
+            }
+        });
+
+        box.addView(titleView);
+        box.addView(valueView);
+        box.addView(copy, new LinearLayout.LayoutParams(-1, dp(42)));
+        content.addView(box, blockParams());
+    }
+
+    private void copyText(String label, String value) {
+        ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (manager == null) {
+            Toast.makeText(this, "复制失败", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        manager.setPrimaryClip(ClipData.newPlainText(label, value));
+        Toast.makeText(this, label + "已复制", Toast.LENGTH_SHORT).show();
     }
 
     private LinearLayout cardBox() {
