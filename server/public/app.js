@@ -36,8 +36,6 @@ const screenPlaceholder = document.getElementById("screenPlaceholder");
 const screenWall = document.getElementById("screenWall");
 const screenWallGrid = document.getElementById("screenWallGrid");
 const screenWallEmpty = document.getElementById("screenWallEmpty");
-const wallSizeRange = document.getElementById("wallSizeRange");
-const wallSizeValue = document.getElementById("wallSizeValue");
 const wallControlWindow = document.getElementById("wallControlWindow");
 const wallControlTitle = document.getElementById("wallControlTitle");
 const wallControlMeta = document.getElementById("wallControlMeta");
@@ -105,10 +103,12 @@ let wallDragMoved = false;
 let wallDragStartedRemote = false;
 let wallDragButton = "left";
 let wallResizeState = null;
+let wallTileResizeState = null;
 let wallPendingText = "";
 let wallPendingTextTimer = 0;
 let fileTransfers = [];
 let inputSerial = 0;
+const wallTileSizes = new Map();
 
 function devicePlatform(device) {
   return String(device?.platform || "android").toLowerCase();
@@ -572,7 +572,7 @@ function renderScreenWall() {
   const nextKey = wallDevices.map((device) => `${device.id}:${device.online ? 1 : 0}:${hasScreenPermission(device) ? 1 : 0}:${monitorSessions.has(device.id) ? 1 : 0}`).join("|");
   screenWallEmpty.classList.toggle("hidden", wallDevices.length > 0);
   if (nextKey === wallRenderKey) {
-    updateWallSize();
+    applyWallTileSizes();
     syncMonitorSessions();
     updateWallControlState();
     return;
@@ -582,35 +582,53 @@ function renderScreenWall() {
   for (const device of wallDevices) {
     const online = canMonitorDevice(device);
     const connected = monitorSessions.has(device.id);
+    const size = wallTileSize(device.id);
     const tile = document.createElement("article");
     tile.className = `wall-tile ${online ? "" : "offline"}`;
-    tile.style.setProperty("--tile-width", `${Number(wallSizeRange.value || 280)}px`);
+    tile.dataset.wallTile = device.id;
+    tile.style.width = `${size.width}px`;
+    tile.style.height = `${size.height}px`;
     tile.innerHTML = `
       <header>
-        <strong>${escapeHtml(deviceName(device))}</strong>
-        <span>${escapeHtml(device.id)} · ${online ? (connected ? "监控中" : "连接中") : (device.online ? "屏幕未开" : "离线")}</span>
+        <div>
+          <strong>${escapeHtml(deviceName(device))}</strong>
+          <span>${escapeHtml(device.id)} · ${online ? (connected ? "监控中" : "连接中") : (device.online ? "屏幕未开" : "离线")}</span>
+        </div>
+        <button class="wall-fullscreen-icon" type="button" data-fullscreen-device="${escapeAttr(device.id)}" title="全屏播放" aria-label="全屏播放">⛶</button>
       </header>
       <div class="wall-screen">
         <canvas data-wall-device="${escapeAttr(device.id)}"></canvas>
         <div class="wall-screen-empty">${online ? "等待画面" : "不可监控"}</div>
       </div>
-      <footer>
-        <button type="button" data-open-device="${escapeAttr(device.id)}">放大操作</button>
-        <button type="button" data-fullscreen-device="${escapeAttr(device.id)}">全屏播放</button>
-      </footer>
+      <span class="wall-tile-resize wall-tile-resize-nw" data-wall-tile-resize="nw" aria-hidden="true"></span>
+      <span class="wall-tile-resize wall-tile-resize-ne" data-wall-tile-resize="ne" aria-hidden="true"></span>
+      <span class="wall-tile-resize wall-tile-resize-sw" data-wall-tile-resize="sw" aria-hidden="true"></span>
+      <span class="wall-tile-resize wall-tile-resize-se" data-wall-tile-resize="se" aria-hidden="true"></span>
     `;
-    tile.querySelector("[data-open-device]").addEventListener("click", () => openWallControl(device.id));
-    tile.querySelector("[data-fullscreen-device]").addEventListener("click", () => toggleWallTileFullscreen(tile));
+    tile.querySelector(".wall-screen").addEventListener("dblclick", () => openWallControl(device.id));
+    tile.querySelector("[data-fullscreen-device]").addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleWallTileFullscreen(tile);
+    });
+    for (const handle of tile.querySelectorAll("[data-wall-tile-resize]")) {
+      handle.addEventListener("pointerdown", beginWallTileResize);
+    }
     screenWallGrid.appendChild(tile);
   }
   syncMonitorSessions();
   updateWallControlState();
 }
 
-function updateWallSize() {
-  const size = Number(wallSizeRange.value || 280);
-  wallSizeValue.textContent = `${size}px`;
-  screenWallGrid.style.setProperty("--tile-width", `${size}px`);
+function wallTileSize(deviceId) {
+  return wallTileSizes.get(deviceId) || { width: 280, height: 540 };
+}
+
+function applyWallTileSizes() {
+  for (const tile of screenWallGrid.querySelectorAll("[data-wall-tile]")) {
+    const size = wallTileSize(tile.dataset.wallTile);
+    tile.style.width = `${size.width}px`;
+    tile.style.height = `${size.height}px`;
+  }
 }
 
 function activeWallSessionId() {
@@ -720,6 +738,67 @@ async function toggleWallTileFullscreen(tile) {
   } else {
     await tile.requestFullscreen().catch(() => {});
   }
+}
+
+function wallTileMinSize() {
+  return { width: 180, height: 300 };
+}
+
+function clampWallTileSize(size) {
+  const min = wallTileMinSize();
+  return {
+    width: Math.max(min.width, Math.min(900, Math.round(size.width))),
+    height: Math.max(min.height, Math.min(1200, Math.round(size.height)))
+  };
+}
+
+function beginWallTileResize(event) {
+  if (document.fullscreenElement) return;
+  const handle = event.currentTarget.dataset.wallTileResize;
+  const tile = event.currentTarget.closest("[data-wall-tile]");
+  if (!handle || !tile) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = tile.getBoundingClientRect();
+  wallTileResizeState = {
+    handle,
+    tile,
+    deviceId: tile.dataset.wallTile,
+    pointerId: event.pointerId,
+    target: event.currentTarget,
+    startX: event.clientX,
+    startY: event.clientY,
+    width: rect.width,
+    height: rect.height
+  };
+  event.currentTarget.classList.add("resizing");
+  document.body.classList.add("wall-resizing");
+  document.body.style.cursor = getComputedStyle(event.currentTarget).cursor;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function moveWallTileResize(event) {
+  if (!wallTileResizeState) return;
+  if (event.pointerId !== undefined && event.pointerId !== wallTileResizeState.pointerId) return;
+  event.preventDefault();
+  const dx = event.clientX - wallTileResizeState.startX;
+  const dy = event.clientY - wallTileResizeState.startY;
+  const next = clampWallTileSize({
+    width: wallTileResizeState.width + (wallTileResizeState.handle.includes("w") ? -dx : dx),
+    height: wallTileResizeState.height + (wallTileResizeState.handle.includes("n") ? -dy : dy)
+  });
+  wallTileSizes.set(wallTileResizeState.deviceId, next);
+  wallTileResizeState.tile.style.width = `${next.width}px`;
+  wallTileResizeState.tile.style.height = `${next.height}px`;
+}
+
+function endWallTileResize(event) {
+  if (!wallTileResizeState) return;
+  if (event.pointerId !== undefined && event.pointerId !== wallTileResizeState.pointerId) return;
+  wallTileResizeState.target?.classList.remove("resizing");
+  document.body.classList.remove("wall-resizing");
+  document.body.style.cursor = "";
+  wallTileResizeState = null;
 }
 
 function wallControlMinSize() {
@@ -1398,7 +1477,6 @@ loginModeBtn.addEventListener("click", () => setAuthMode("login"));
 registerModeBtn.addEventListener("click", () => setAuthMode("register"));
 controlTabBtn.addEventListener("click", () => setStageTab("control"));
 wallTabBtn.addEventListener("click", () => setStageTab("wall"));
-wallSizeRange.addEventListener("input", updateWallSize);
 
 accountMenuBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -1748,6 +1826,9 @@ for (const handle of wallResizeHandles) {
 window.addEventListener("pointermove", moveWallResize);
 window.addEventListener("pointerup", endWallResize);
 window.addEventListener("pointercancel", endWallResize);
+window.addEventListener("pointermove", moveWallTileResize);
+window.addEventListener("pointerup", endWallTileResize);
+window.addEventListener("pointercancel", endWallTileResize);
 
 window.addEventListener("resize", () => {
   if (isWallControlOpen()) normalizeWallControlBounds();
