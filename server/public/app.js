@@ -54,6 +54,7 @@ const wallControlHomeBtn = document.getElementById("wallControlHomeBtn");
 const wallControlHomeSwipeBtn = document.getElementById("wallControlHomeSwipeBtn");
 const wallResizeHandles = Array.from(document.querySelectorAll("[data-wall-resize]"));
 const viewer = document.getElementById("viewer");
+const rtcVideo = document.getElementById("rtcVideo");
 const canvas = document.getElementById("screenCanvas");
 const ctx = canvas.getContext("2d");
 const remoteCursor = document.createElement("div");
@@ -113,6 +114,7 @@ let wallPendingText = "";
 let wallPendingTextTimer = 0;
 let fileTransfers = [];
 let inputSerial = 0;
+let rtcState = null;
 const wallTileSizes = new Map();
 
 function devicePlatform(device) {
@@ -267,6 +269,7 @@ function setUser(user) {
 function closeSocket() {
   wsGeneration += 1;
   clearTimeout(reconnectTimer);
+  closeRtc("socket_closed", false);
   if (ws) {
     ws.close();
     ws = null;
@@ -332,6 +335,21 @@ function connect() {
         ? `${deviceName(msg.device)} · ${msg.device.model || msg.device.osVersion || "未知型号"}`
         : `已进入画面，仅可观看：${controlBlockReason(msg.device) || "控制未就绪"}`;
     }
+    if (msg.type === "rtc-ready") {
+      handleRtcReady(msg);
+    }
+    if (msg.type === "rtc-answer") {
+      handleRtcAnswer(msg);
+    }
+    if (msg.type === "rtc-ice-candidate") {
+      handleRtcRemoteCandidate(msg);
+    }
+    if (msg.type === "rtc-state") {
+      handleRtcPeerState(msg);
+    }
+    if (msg.type === "rtc-stopped") {
+      handleRtcStopped(msg);
+    }
     if (msg.type === "frame") {
       handleTextFrame(msg);
     }
@@ -358,6 +376,10 @@ function connect() {
     }
     if (msg.type === "error") {
       const errorDeviceId = String(msg.device?.id || msg.deviceId || "").toUpperCase();
+      if (msg.error === "rtc_not_supported" && errorDeviceId && errorDeviceId === activeDeviceId) {
+        fallbackToRelay("rtc_not_supported");
+        return;
+      }
       if (errorDeviceId && pendingControlIntents.get(errorDeviceId) === "monitor") {
         pendingControlIntents.delete(errorDeviceId);
         renderScreenWall();
@@ -394,6 +416,7 @@ function openScreen() {
 
 function closeScreen(stopRemote = true) {
   const closingDeviceId = activeDeviceId;
+  closeRtc("screen_closed", stopRemote);
   if (isViewerFullscreen()) {
     document.exitFullscreen().catch(() => {});
   }
@@ -410,6 +433,9 @@ function closeScreen(stopRemote = true) {
   setInputReady(false);
   stopBtn.disabled = true;
   viewer.classList.remove("has-frame");
+  viewer.classList.remove("rtc-active");
+  rtcVideo.classList.add("hidden");
+  rtcVideo.srcObject = null;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   viewerWrap.classList.add("closed");
   screenPlaceholder.classList.remove("hidden");
@@ -1192,6 +1218,8 @@ function errorText(msg) {
   if (msg.error === "input_not_ready") return `当前仅可观看：${controlBlockReason(device) || "控制未就绪"}`;
   if (msg.error === "device_offline") return "设备不在线";
   if (msg.error === "device_not_bound") return "设备还没有绑定到当前账号";
+  if (msg.error === "rtc_not_supported") return "设备暂不支持直连，正在使用中转";
+  if (msg.error === "bad_rtc_session") return "直连会话已失效";
   if (msg.error === "bad_verification_code") return "设备验证码不正确";
   if (msg.error === "user_not_approved") return "账号还没有审核通过";
   if (msg.error === "invalid_login") return "用户名或密码错误";
@@ -1202,6 +1230,189 @@ function errorText(msg) {
   if (msg.error === "file_too_large") return "文件超过服务端限制";
   if (msg.error === "transfer_not_found") return "文件下发任务不存在或已过期";
   return `操作失败：${msg.error}`;
+}
+
+function supportsRtc(device) {
+  const capabilities = device?.rtcCapabilities || {};
+  return Boolean(window.RTCPeerConnection && capabilities.webrtc && capabilities.video);
+}
+
+function closeRtc(reason = "closed", notify = true) {
+  const state = rtcState;
+  rtcState = null;
+  clearTimeout(state?.fallbackTimer);
+  try {
+    state?.controlChannel?.close();
+  } catch {
+    // Best effort close.
+  }
+  try {
+    state?.telemetryChannel?.close();
+  } catch {
+    // Best effort close.
+  }
+  try {
+    state?.pc?.close();
+  } catch {
+    // Best effort close.
+  }
+  if (rtcVideo) {
+    rtcVideo.pause();
+    rtcVideo.srcObject = null;
+    rtcVideo.classList.add("hidden");
+  }
+  viewer.classList.remove("rtc-active");
+  if (notify && state?.sessionId && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "rtc-stop", sessionId: state.sessionId, deviceId: state.deviceId, reason }));
+  }
+}
+
+function fallbackToRelay(reason = "fallback") {
+  const deviceId = rtcState?.deviceId || activeDeviceId;
+  const alreadyHasSession = rtcState?.sessionId || sessionId;
+  closeRtc(reason, true);
+  if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  activeMeta.textContent = "直连未建立，正在回退中转";
+  pendingControlIntents.set(deviceId, "control");
+  ws.send(JSON.stringify({ type: "control", deviceId }));
+  if (alreadyHasSession) sessionId = "";
+}
+
+async function handleRtcReady(msg) {
+  if (msg.deviceId !== activeDeviceId || !screenOpen) return;
+  if (!window.RTCPeerConnection) {
+    fallbackToRelay("unsupported");
+    return;
+  }
+  closeRtc("replaced", false);
+  sessionId = msg.sessionId;
+  pendingControlIntents.delete(msg.deviceId);
+  const device = msg.device || devices.find((item) => item.id === activeDeviceId);
+  if (device) {
+    setActiveDevice(device);
+    setInputReady(canControlDevice(device));
+  }
+  const pc = new RTCPeerConnection({ iceServers: msg.iceServers || [] });
+  const controlChannel = pc.createDataChannel("control", { ordered: true });
+  const telemetryChannel = pc.createDataChannel("telemetry", { ordered: false, maxRetransmits: 0 });
+  rtcState = {
+    pc,
+    controlChannel,
+    telemetryChannel,
+    sessionId: msg.sessionId,
+    deviceId: msg.deviceId,
+    connected: false,
+    fallbackTimer: setTimeout(() => fallbackToRelay("rtc_timeout"), 8000)
+  };
+  controlChannel.addEventListener("open", () => {
+    if (rtcState?.sessionId !== msg.sessionId) return;
+    activeMeta.textContent = "直连控制通道已建立";
+  });
+  controlChannel.addEventListener("message", (event) => {
+    let payload;
+    try {
+      payload = JSON.parse(String(event.data || "{}"));
+    } catch {
+      return;
+    }
+    if (payload.type === "input-result" && payload.ok === false) {
+      activeMeta.textContent = `输入执行失败：${payload.error || "dispatch_failed"}`;
+    }
+  });
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addEventListener("track", (event) => {
+    if (rtcState?.sessionId !== msg.sessionId) return;
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    rtcVideo.srcObject = stream;
+    rtcVideo.classList.remove("hidden");
+    viewer.classList.add("rtc-active", "has-frame");
+    rtcVideo.play().catch(() => {});
+  });
+  pc.addEventListener("icecandidate", (event) => {
+    if (!event.candidate || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "rtc-ice-candidate",
+      sessionId: msg.sessionId,
+      deviceId: msg.deviceId,
+      candidate: event.candidate.toJSON()
+    }));
+  });
+  pc.addEventListener("connectionstatechange", () => {
+    if (rtcState?.sessionId !== msg.sessionId) return;
+    const state = pc.connectionState;
+    reportRtcState(state);
+    if (state === "connected") {
+      rtcState.connected = true;
+      clearTimeout(rtcState.fallbackTimer);
+      activeMeta.textContent = "WebRTC 直连已建立";
+    }
+    if (state === "failed") fallbackToRelay("rtc_failed");
+    if (state === "closed") closeRtc("rtc_closed", false);
+  });
+  pc.addEventListener("iceconnectionstatechange", () => {
+    if (rtcState?.sessionId !== msg.sessionId) return;
+    if (pc.iceConnectionState === "failed") fallbackToRelay("ice_failed");
+  });
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({
+      type: "rtc-offer",
+      sessionId: msg.sessionId,
+      deviceId: msg.deviceId,
+      sdp: offer.sdp
+    }));
+    activeMeta.textContent = "正在尝试局域网/P2P 直连";
+  } catch {
+    fallbackToRelay("offer_failed");
+  }
+}
+
+async function handleRtcAnswer(msg) {
+  if (!rtcState || rtcState.sessionId !== msg.sessionId || !rtcState.pc) return;
+  try {
+    await rtcState.pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+  } catch {
+    fallbackToRelay("answer_failed");
+  }
+}
+
+async function handleRtcRemoteCandidate(msg) {
+  if (!rtcState || rtcState.sessionId !== msg.sessionId || !rtcState.pc || !msg.candidate) return;
+  try {
+    await rtcState.pc.addIceCandidate(msg.candidate);
+  } catch {
+    // Invalid candidates are ignored; ICE can still continue with others.
+  }
+}
+
+function handleRtcPeerState(msg) {
+  if (!rtcState || rtcState.sessionId !== msg.sessionId) return;
+  if (msg.selectedCandidateType && msg.selectedCandidateType !== "unknown") {
+    activeMeta.textContent = `WebRTC ${candidateTypeText(msg.selectedCandidateType)} · ${msg.state || "连接中"}`;
+  }
+}
+
+function handleRtcStopped(msg) {
+  if (!rtcState || rtcState.sessionId !== msg.sessionId) return;
+  closeRtc(msg.reason || "peer_stopped", false);
+}
+
+function candidateTypeText(type) {
+  if (type === "host") return "局域网直连";
+  if (type === "srflx") return "公网 P2P";
+  if (type === "relay") return "TURN 中转";
+  return "连接";
+}
+
+function reportRtcState(state) {
+  if (!rtcState || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: "rtc-state",
+    sessionId: rtcState.sessionId,
+    deviceId: rtcState.deviceId,
+    state
+  }));
 }
 
 function startControl(id) {
@@ -1231,9 +1442,13 @@ function startControl(id) {
     activeMeta.textContent = "设备已添加，但当前离线";
     return;
   }
-  activeMeta.textContent = "正在请求控制";
+  activeMeta.textContent = supportsRtc(device) ? "正在尝试局域网/P2P 直连" : "正在请求控制";
   pendingControlIntents.set(activeDeviceId, "control");
-  ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+  if (supportsRtc(device)) {
+    ws.send(JSON.stringify({ type: "rtc-start", deviceId: activeDeviceId, mode: "control" }));
+  } else {
+    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+  }
 }
 
 function escapeAttr(value) {
@@ -1271,6 +1486,7 @@ async function toggleViewerFullscreen() {
 function drawFrame(msg) {
   if (!msg.image) return;
   if (msg.frameKind && msg.frameKind !== "jpeg") return;
+  if (rtcState?.connected && msg.deviceId === activeDeviceId) return;
   const timestamp = Number(msg.timestamp || 0);
   if (timestamp && timestamp < lastFrameTimestamp) return;
   const drawSerial = ++frameDrawSerial;
@@ -1488,7 +1704,12 @@ function sendInput(payload) {
     }
     return;
   }
-  ws.send(JSON.stringify({ type: "input", sessionId, inputId: `h5-${Date.now()}-${++inputSerial}`, ...payload }));
+  const message = { type: "input", sessionId, inputId: `h5-${Date.now()}-${++inputSerial}`, ...payload };
+  if (rtcState?.controlChannel?.readyState === "open" && rtcState.sessionId === sessionId) {
+    rtcState.controlChannel.send(JSON.stringify(message));
+    return;
+  }
+  ws.send(JSON.stringify(message));
 }
 
 function sendWallInput(payload) {

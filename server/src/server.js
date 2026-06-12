@@ -28,6 +28,13 @@ const MAC_AGENT_X86_64_FILE = process.env.MAC_AGENT_X86_64_FILE || "BHZN-ToDesk-
 const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 100 * 1024 * 1024);
 const FILE_TRANSFER_TTL_MS = Number(process.env.FILE_TRANSFER_TTL_MS || 24 * 60 * 60 * 1000);
 const FILE_TRANSFER_DIR = path.join(DATA_DIR, "file-transfers");
+const RTC_SESSION_TTL_MS = Number(process.env.RTC_SESSION_TTL_MS || 60 * 60 * 1000);
+const RTC_STUN_URLS = splitEnvList(process.env.RTC_STUN_URLS || "stun:stun.cloudflare.com:3478");
+const RTC_TURN_URLS = splitEnvList(process.env.RTC_TURN_URLS || "");
+const RTC_TURN_SECRET = process.env.RTC_TURN_SECRET || "";
+const RTC_TURN_USERNAME = process.env.RTC_TURN_USERNAME || "";
+const RTC_TURN_CREDENTIAL = process.env.RTC_TURN_CREDENTIAL || "";
+const RTC_TURN_TTL_SECONDS = Math.max(60, Number(process.env.RTC_TURN_TTL_SECONDS || 3600));
 
 process.on("uncaughtException", (error) => {
   const code = error?.code || "";
@@ -68,12 +75,20 @@ const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 25 * 1024 * 1
 const devices = new Map();
 const clients = new Set();
 const controllers = new Map();
+const rtcSessions = new Map();
 const fileTransfers = new Map();
 const trafficStats = new Map();
 let state = loadState();
 
 function now() {
   return Date.now();
+}
+
+function splitEnvList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function iso(time = now()) {
@@ -165,6 +180,65 @@ function trafficStatsView(stats) {
     ...stats,
     online: Boolean(device),
     controllerCount: device ? device.controllers.size : 0
+  };
+}
+
+function rtcIceServers(userId, deviceId, sessionId) {
+  const iceServers = [];
+  for (const url of RTC_STUN_URLS) {
+    iceServers.push({ urls: [url] });
+  }
+  if (RTC_TURN_URLS.length) {
+    if (RTC_TURN_SECRET) {
+      const expireAt = Math.floor(now() / 1000) + RTC_TURN_TTL_SECONDS;
+      const username = `${expireAt}:${userId}:${deviceId}:${sessionId}`;
+      const credential = crypto.createHmac("sha1", RTC_TURN_SECRET).update(username).digest("base64");
+      iceServers.push({ urls: RTC_TURN_URLS, username, credential });
+    } else if (RTC_TURN_USERNAME && RTC_TURN_CREDENTIAL) {
+      iceServers.push({ urls: RTC_TURN_URLS, username: RTC_TURN_USERNAME, credential: RTC_TURN_CREDENTIAL });
+    }
+  }
+  return iceServers;
+}
+
+function publicRtcCapabilities(device) {
+  const capabilities = device?.rtcCapabilities || {};
+  return {
+    webrtc: Boolean(capabilities.webrtc),
+    video: Boolean(capabilities.video),
+    dataChannel: Boolean(capabilities.dataChannel),
+    localNetwork: capabilities.localNetwork !== false,
+    codecs: Array.isArray(capabilities.codecs) ? capabilities.codecs.slice(0, 8).map(String) : [],
+    version: String(capabilities.version || "")
+  };
+}
+
+function sanitizeRtcCandidate(value) {
+  if (!value || typeof value !== "object") return null;
+  const candidate = String(value.candidate || "");
+  if (!candidate || candidate.length > 4096) return null;
+  return {
+    candidate,
+    sdpMid: value.sdpMid == null ? null : String(value.sdpMid).slice(0, 64),
+    sdpMLineIndex: Number.isFinite(Number(value.sdpMLineIndex)) ? Number(value.sdpMLineIndex) : null,
+    usernameFragment: value.usernameFragment == null ? undefined : String(value.usernameFragment).slice(0, 128)
+  };
+}
+
+function sanitizeRtcSdp(value) {
+  const sdp = String(value || "");
+  if (!sdp || sdp.length > 2_000_000) return "";
+  return sdp;
+}
+
+function rtcSessionView(session) {
+  return {
+    sessionId: session.sessionId,
+    deviceId: session.deviceId,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
+    ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
+    iceServers: session.iceServers
   };
 }
 
@@ -531,6 +605,7 @@ function deviceView(device) {
     permissions: device.permissions,
     controlEnabled: device.controlEnabled,
     screen: device.screen,
+    rtcCapabilities: publicRtcCapabilities(device),
     online: true,
     lastSeen: device.lastSeen,
     controllerCount: device.controllers.size
@@ -647,6 +722,7 @@ function stopControllerSession(sessionId, reason, options = {}) {
   const broadcast = options.broadcast !== false;
   const controller = controllers.get(sessionId);
   if (!controller) return null;
+  stopRtcSession(sessionId, reason, { notifyController, notifyDevice });
   const device = devices.get(controller.deviceId);
   controllers.delete(sessionId);
   controller.ws.sessions.delete(sessionId);
@@ -668,6 +744,180 @@ function stopControllerSession(sessionId, reason, options = {}) {
   });
   if (broadcast && device) broadcastDeviceOwners(device.id);
   return controller;
+}
+
+function stopRtcSession(sessionId, reason, options = {}) {
+  const session = rtcSessions.get(sessionId);
+  if (!session) return null;
+  rtcSessions.delete(sessionId);
+  const payload = {
+    type: "rtc-stopped",
+    sessionId,
+    deviceId: session.deviceId,
+    reason: String(reason || "stopped")
+  };
+  if (options.notifyController !== false && session.controllerWs?.readyState === WebSocket.OPEN) {
+    send(session.controllerWs, payload);
+  }
+  if (options.notifyDevice !== false && session.deviceWs?.readyState === WebSocket.OPEN) {
+    send(session.deviceWs, payload);
+  }
+  relayLog("rtc.stop", {
+    sessionId,
+    reason: payload.reason,
+    userId: session.userId,
+    deviceId: session.deviceId
+  });
+  return session;
+}
+
+function stopRtcSessionsForWs(ws, reason) {
+  for (const [sessionId, session] of Array.from(rtcSessions)) {
+    if (session.controllerWs === ws || session.deviceWs === ws) {
+      stopRtcSession(sessionId, reason, {
+        notifyController: session.controllerWs !== ws,
+        notifyDevice: session.deviceWs !== ws
+      });
+    }
+  }
+}
+
+function pruneRtcSessions() {
+  const cutoff = now();
+  for (const [sessionId, session] of Array.from(rtcSessions)) {
+    if (session.expiresAt <= cutoff || session.controllerWs?.readyState !== WebSocket.OPEN || session.deviceWs?.readyState !== WebSocket.OPEN) {
+      stopRtcSession(sessionId, session.expiresAt <= cutoff ? "expired" : "peer_closed");
+    }
+  }
+}
+
+function rtcSessionForMessage(ws, msg) {
+  const sessionId = String(msg.sessionId || "");
+  const session = rtcSessions.get(sessionId);
+  if (!session) {
+    send(ws, { type: "error", error: "bad_rtc_session", sessionId });
+    return null;
+  }
+  if (ws.role === "controller" && (session.controllerWs !== ws || session.userId !== ws.userId)) {
+    send(ws, { type: "error", error: "bad_rtc_session", sessionId });
+    return null;
+  }
+  if (ws.role === "device" && (session.deviceWs !== ws || session.deviceId !== ws.deviceId)) {
+    send(ws, { type: "error", error: "bad_rtc_session", sessionId });
+    return null;
+  }
+  return session;
+}
+
+function startRtcSession(ws, msg) {
+  const id = normalizeDeviceId(msg.deviceId);
+  const binding = findBinding(ws.userId, id);
+  const device = devices.get(id);
+  if (!binding) {
+    send(ws, { type: "error", error: "device_not_bound", deviceId: id });
+    return;
+  }
+  if (!device) {
+    send(ws, { type: "error", error: "device_offline", device: bindingView(binding), deviceId: id });
+    return;
+  }
+  if (!canViewDevice(device)) {
+    send(ws, { type: "error", error: "screen_not_ready", device: deviceView(device), deviceId: id });
+    return;
+  }
+  if (!publicRtcCapabilities(device).webrtc || !publicRtcCapabilities(device).video) {
+    send(ws, { type: "error", error: "rtc_not_supported", device: deviceView(device), deviceId: id });
+    return;
+  }
+  for (const [existingSessionId, existingSession] of Array.from(rtcSessions)) {
+    if (existingSession.controllerWs === ws && existingSession.deviceId === id) {
+      stopRtcSession(existingSessionId, "replaced");
+    }
+  }
+  const sessionId = makeSessionId();
+  const iceServers = rtcIceServers(ws.userId, id, sessionId);
+  const session = {
+    sessionId,
+    userId: ws.userId,
+    deviceId: id,
+    controllerWs: ws,
+    deviceWs: device.ws,
+    iceServers,
+    createdAt: now(),
+    expiresAt: now() + RTC_SESSION_TTL_MS,
+    mode: String(msg.mode || "control")
+  };
+  rtcSessions.set(sessionId, session);
+  const view = rtcSessionView(session);
+  send(ws, { type: "rtc-ready", ...view, device: deviceView(device) });
+  send(device.ws, {
+    type: "rtc-request",
+    ...view,
+    controllerId: ws.userId,
+    mode: session.mode
+  });
+  relayLog("rtc.ready", {
+    sessionId,
+    userId: ws.userId,
+    deviceId: id,
+    iceServerCount: iceServers.length,
+    hasTurn: iceServers.some((item) => String([].concat(item.urls || []).join(",")).includes("turn:"))
+  });
+}
+
+function forwardRtcSignal(ws, msg) {
+  const session = rtcSessionForMessage(ws, msg);
+  if (!session) return;
+  const fromController = ws.role === "controller";
+  const target = fromController ? session.deviceWs : session.controllerWs;
+  if (!target || target.readyState !== WebSocket.OPEN) {
+    send(ws, { type: "error", error: "rtc_peer_offline", sessionId: session.sessionId });
+    return;
+  }
+  const base = {
+    type: msg.type,
+    sessionId: session.sessionId,
+    deviceId: session.deviceId
+  };
+  if (msg.type === "rtc-offer" || msg.type === "rtc-answer") {
+    const sdp = sanitizeRtcSdp(msg.sdp);
+    if (!sdp) {
+      send(ws, { type: "error", error: "bad_rtc_sdp", sessionId: session.sessionId });
+      return;
+    }
+    send(target, { ...base, sdp });
+    return;
+  }
+  if (msg.type === "rtc-ice-candidate") {
+    const candidate = sanitizeRtcCandidate(msg.candidate);
+    if (!candidate) return;
+    send(target, { ...base, candidate });
+    return;
+  }
+  if (msg.type === "rtc-state") {
+    const state = String(msg.state || "").slice(0, 64);
+    relayLog("rtc.state", {
+      sessionId: session.sessionId,
+      userId: session.userId,
+      deviceId: session.deviceId,
+      role: ws.role,
+      state,
+      selectedCandidateType: String(msg.selectedCandidateType || "unknown").slice(0, 32),
+      rttMs: Number(msg.rttMs || 0),
+      bitrateKbps: Number(msg.bitrateKbps || 0)
+    });
+    send(target, {
+      ...base,
+      state,
+      selectedCandidateType: String(msg.selectedCandidateType || "unknown").slice(0, 32),
+      rttMs: Number(msg.rttMs || 0),
+      bitrateKbps: Number(msg.bitrateKbps || 0)
+    });
+    return;
+  }
+  if (msg.type === "rtc-stop") {
+    stopRtcSession(session.sessionId, msg.reason || "stopped");
+  }
 }
 
 function attachController(device, ws) {
@@ -1208,6 +1458,7 @@ wss.on("connection", (ws) => {
         permissions: msg.permissions || {},
         controlEnabled: Boolean(msg.controlEnabled),
         screen: msg.screen || null,
+        rtcCapabilities: msg.rtcCapabilities || {},
         verificationCode: normalizeDeviceCode(msg.verificationCode),
         lastSeen: now(),
         controllers: previous?.controllers || new Set()
@@ -1233,8 +1484,14 @@ wss.on("connection", (ws) => {
         if (msg.permissions) device.permissions = msg.permissions;
         if (typeof msg.controlEnabled === "boolean") device.controlEnabled = msg.controlEnabled;
         if (msg.screen) device.screen = msg.screen;
+        if (msg.rtcCapabilities) device.rtcCapabilities = msg.rtcCapabilities;
         if (msg.verificationCode) device.verificationCode = normalizeDeviceCode(msg.verificationCode);
         updateBindingsForDevice(device, { persist: msg.type !== "heartbeat" });
+        return;
+      }
+
+      if (["rtc-answer", "rtc-ice-candidate", "rtc-state", "rtc-stop"].includes(msg.type)) {
+        forwardRtcSignal(ws, msg);
         return;
       }
 
@@ -1351,6 +1608,16 @@ wss.on("connection", (ws) => {
         return;
       }
 
+      if (msg.type === "rtc-start") {
+        startRtcSession(ws, msg);
+        return;
+      }
+
+      if (["rtc-offer", "rtc-ice-candidate", "rtc-state", "rtc-stop"].includes(msg.type)) {
+        forwardRtcSignal(ws, msg);
+        return;
+      }
+
       if (msg.type === "input") {
         const sessionId = String(msg.sessionId || "");
         const controller = controllers.get(sessionId);
@@ -1448,6 +1715,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    stopRtcSessionsForWs(ws, "peer_closed");
     if (ws.role === "controller") {
       clients.delete(ws);
       for (const sessionId of Array.from(ws.sessions)) {
@@ -1495,6 +1763,7 @@ setInterval(() => {
     broadcastDeviceOwners(deviceId);
   }
   pruneFileTransfers();
+  pruneRtcSessions();
 }, WS_PING_INTERVAL_MS).unref();
 
 server.listen(PORT, HOST, () => {

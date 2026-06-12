@@ -374,6 +374,12 @@ class DesktopAgent:
             self.remove_control_session(msg)
             self.send_status("status")
             return
+        if msg_type == "rtc-request":
+            self.handle_rtc_request(msg)
+            return
+        if msg_type in {"rtc-offer", "rtc-ice-candidate", "rtc-stopped"}:
+            self.handle_rtc_signal(msg)
+            return
         if msg_type == "frame-ack":
             self.handle_frame_ack(msg)
             return
@@ -448,12 +454,52 @@ class DesktopAgent:
             },
             "controlEnabled": bool(self.control_enabled and self.capture_enabled),
             "screen": self.screen,
+            "rtcCapabilities": self.rtc_capabilities(),
         }
 
     def send_status(self, msg_type: str = "status"):
         self.capture_enabled = self.screen_permission_available()
         self.control_enabled = self.input_permission_available()
         self.send_json(self.base_status(msg_type))
+
+    def rtc_capabilities(self) -> dict:
+        return {
+            "webrtc": False,
+            "video": False,
+            "dataChannel": False,
+            "localNetwork": True,
+            "codecs": [],
+            "version": "planned-native",
+        }
+
+    def handle_rtc_request(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "")
+        print(f"[agent] rtc requested session={session_id} but native WebRTC is not implemented", flush=True)
+        self.send_json(
+            {
+                "type": "rtc-state",
+                "sessionId": session_id,
+                "deviceId": self.config.device_id,
+                "state": "failed",
+                "selectedCandidateType": "unknown",
+                "error": "not_implemented",
+            }
+        )
+
+    def handle_rtc_signal(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "")
+        if msg.get("type") == "rtc-stopped":
+            return
+        self.send_json(
+            {
+                "type": "rtc-state",
+                "sessionId": session_id,
+                "deviceId": self.config.device_id,
+                "state": "failed",
+                "selectedCandidateType": "unknown",
+                "error": "not_implemented",
+            }
+        )
 
     def macos_capture_bridge_enabled(self) -> bool:
         return platform_name() == "macos" and os.environ.get("BHZN_MAC_CAPTURE_BRIDGE") == "1"
