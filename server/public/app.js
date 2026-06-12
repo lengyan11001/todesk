@@ -29,11 +29,16 @@ const activeTitle = document.getElementById("activeTitle");
 const activeMeta = document.getElementById("activeMeta");
 const controlTabBtn = document.getElementById("controlTabBtn");
 const wallTabBtn = document.getElementById("wallTabBtn");
+const filesTabBtn = document.getElementById("filesTabBtn");
 const stageBody = document.querySelector(".stage-body");
 const screenWorkspace = document.getElementById("screenWorkspace");
 const viewerWrap = document.getElementById("viewerWrap");
 const screenPlaceholder = document.getElementById("screenPlaceholder");
 const screenWall = document.getElementById("screenWall");
+const fileTransferWorkspace = document.getElementById("fileTransferWorkspace");
+const fileTransferSummary = document.getElementById("fileTransferSummary");
+const fileTransferTable = document.getElementById("fileTransferTable");
+const fileTransferEmpty = document.getElementById("fileTransferEmpty");
 const screenWallGrid = document.getElementById("screenWallGrid");
 const screenWallEmpty = document.getElementById("screenWallEmpty");
 const wallControlWindow = document.getElementById("wallControlWindow");
@@ -991,9 +996,37 @@ function fileStatusText(status) {
   return status || "-";
 }
 
+function fileStatusClass(status) {
+  if (status === "saved") return "saved";
+  if (status === "failed") return "failed";
+  if (status === "downloading") return "downloading";
+  return "pending";
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function fileTransferDeviceLabel(transfer) {
+  const deviceId = String(transfer?.deviceId || "").toUpperCase();
+  const device = devices.find((item) => item.id === deviceId);
+  if (!device) return deviceId || "-";
+  return `${deviceId} · ${deviceName(device)}`;
+}
+
 function upsertFileTransfer(transfer) {
   if (!transfer?.id) return;
-  fileTransfers = [transfer, ...fileTransfers.filter((item) => item.id !== transfer.id)].slice(0, 20);
+  fileTransfers = [transfer, ...fileTransfers.filter((item) => item.id !== transfer.id)]
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+    .slice(0, 100);
   renderFileTransfers();
   if (fileHint) {
     fileHint.textContent = `${transfer.fileName || "文件"}：${fileStatusText(transfer.status)}${transfer.error ? `，${transfer.error}` : ""}`;
@@ -1015,6 +1048,72 @@ function renderFileTransfers() {
     row.appendChild(title);
     row.appendChild(meta);
     fileTransferLog.appendChild(row);
+  }
+  renderFileTransferWorkspace();
+}
+
+function renderFileTransferWorkspace() {
+  if (!fileTransferTable || !fileTransferEmpty) return;
+  fileTransferTable.innerHTML = "";
+  fileTransferEmpty.classList.toggle("hidden", fileTransfers.length > 0);
+  fileTransferTable.classList.toggle("hidden", fileTransfers.length === 0);
+  const savedCount = fileTransfers.filter((item) => item.status === "saved").length;
+  const failedCount = fileTransfers.filter((item) => item.status === "failed").length;
+  if (fileTransferSummary) {
+    fileTransferSummary.textContent = fileTransfers.length
+      ? `最近 ${fileTransfers.length} 条 · 已保存 ${savedCount} · 失败 ${failedCount}`
+      : "暂无传输记录";
+  }
+  for (const transfer of fileTransfers) {
+    const row = document.createElement("article");
+    row.className = `file-transfer-card ${fileStatusClass(transfer.status)}`;
+
+    const head = document.createElement("div");
+    head.className = "file-transfer-card-head";
+    const title = document.createElement("strong");
+    title.textContent = transfer.fileName || "file";
+    const status = document.createElement("span");
+    status.className = "file-transfer-status";
+    status.textContent = fileStatusText(transfer.status);
+    head.appendChild(title);
+    head.appendChild(status);
+
+    const grid = document.createElement("div");
+    grid.className = "file-transfer-fields";
+    const fields = [
+      ["目标设备", fileTransferDeviceLabel(transfer)],
+      ["大小", formatBytes(transfer.size)],
+      ["更新时间", formatDateTime(transfer.updatedAt || transfer.createdAt)],
+      ["保存位置", transfer.devicePath || (transfer.status === "saved" ? "设备未返回路径" : "-")]
+    ];
+    if (transfer.error) fields.push(["错误", transfer.error]);
+    for (const [labelText, valueText] of fields) {
+      const label = document.createElement("span");
+      label.textContent = labelText;
+      const value = document.createElement("b");
+      value.textContent = valueText || "-";
+      grid.appendChild(label);
+      grid.appendChild(value);
+    }
+
+    row.appendChild(head);
+    row.appendChild(grid);
+    fileTransferTable.appendChild(row);
+  }
+}
+
+async function loadFileTransfers() {
+  if (!sessionToken || currentUser?.status !== "approved") return;
+  try {
+    const data = await api("/api/file-transfers");
+    fileTransfers = (data.transfers || [])
+      .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+      .slice(0, 100);
+    renderFileTransfers();
+  } catch (error) {
+    if (fileTransferSummary) {
+      fileTransferSummary.textContent = errorText(error.data || { error: error.message });
+    }
   }
 }
 
@@ -1059,20 +1158,31 @@ function setInputReady(enabled) {
 
 function setStageTab(tab) {
   const previousTab = activeStageTab;
-  activeStageTab = tab === "wall" ? "wall" : "control";
+  activeStageTab = ["wall", "files"].includes(tab) ? tab : "control";
   controlTabBtn.classList.toggle("active", activeStageTab === "control");
   wallTabBtn.classList.toggle("active", activeStageTab === "wall");
+  filesTabBtn.classList.toggle("active", activeStageTab === "files");
   stageBody.classList.toggle("wall-mode", activeStageTab === "wall");
+  stageBody.classList.toggle("files-mode", activeStageTab === "files");
   screenWorkspace.classList.toggle("hidden", activeStageTab !== "control");
   screenWall.classList.toggle("hidden", activeStageTab !== "wall");
+  fileTransferWorkspace.classList.toggle("hidden", activeStageTab !== "files");
   if (activeStageTab === "wall") {
     if (screenOpen) closeScreen(true);
     wallRenderKey = "";
     renderScreenWall();
+  } else if (activeStageTab === "files") {
+    if (screenOpen) closeScreen(true);
+    closeWallControl();
+    clearMonitorSessions(true);
+    wallRenderKey = "";
+    renderFileTransferWorkspace();
   } else if (previousTab === "wall") {
     closeWallControl();
     clearMonitorSessions(true);
     wallRenderKey = "";
+  } else if (previousTab === "files") {
+    renderFileTransferWorkspace();
   }
 }
 
@@ -1175,8 +1285,8 @@ function drawFrame(msg) {
     ctx.drawImage(img, 0, 0);
     lastFrameTimestamp = timestamp || Date.now();
     viewer.classList.add("has-frame");
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "frame-ack", deviceId: msg.deviceId, frameId: msg.frameId || timestamp }));
+    if (ws && ws.readyState === WebSocket.OPEN && sessionId && msg.deviceId === activeDeviceId) {
+      ws.send(JSON.stringify({ type: "frame-ack", sessionId, deviceId: msg.deviceId, frameId: msg.frameId || timestamp }));
     }
   };
   img.src = `data:image/jpeg;base64,${msg.image}`;
@@ -1298,7 +1408,10 @@ async function handleBinaryFrame(data) {
   }
   bitmap.close();
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "frame-ack", deviceId: header.deviceId, frameId: header.frameId || timestamp }));
+    const ackSessionId = header.deviceId === activeDeviceId && screenOpen ? sessionId : "";
+    if (ackSessionId) {
+      ws.send(JSON.stringify({ type: "frame-ack", sessionId: ackSessionId, deviceId: header.deviceId, frameId: header.frameId || timestamp }));
+    }
   }
 }
 
@@ -1465,6 +1578,7 @@ authForm.addEventListener("submit", async (event) => {
       renderDevices();
       syncMonitorSessions();
       renderScreenWall();
+      await loadFileTransfers();
     }
   } catch (error) {
     authHint.textContent = errorText(error.data || { error: error.message });
@@ -1477,6 +1591,7 @@ loginModeBtn.addEventListener("click", () => setAuthMode("login"));
 registerModeBtn.addEventListener("click", () => setAuthMode("register"));
 controlTabBtn.addEventListener("click", () => setStageTab("control"));
 wallTabBtn.addEventListener("click", () => setStageTab("wall"));
+filesTabBtn.addEventListener("click", () => setStageTab("files"));
 
 accountMenuBtn.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -1503,6 +1618,8 @@ logoutBtn.addEventListener("click", async () => {
   sessionToken = "";
   currentUser = null;
   devices = [];
+  fileTransfers = [];
+  renderFileTransfers();
   localStorage.removeItem("bhzn_session_token");
   clearMonitorSessions(true, true);
   closeSocket();
@@ -1893,6 +2010,7 @@ async function boot() {
       renderDevices();
       syncMonitorSessions();
       renderScreenWall();
+      await loadFileTransfers();
     }
   } catch {
     sessionToken = "";

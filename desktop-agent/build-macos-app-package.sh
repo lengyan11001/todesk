@@ -7,40 +7,149 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_VENV="${ROOT_DIR}/.build-venv-macos"
+VERSION="0.1.19"
+MACOS_ARCH="${MACOS_ARCH:-$(uname -m)}"
+BUILD_VENV="${ROOT_DIR}/.build-venv-macos-${MACOS_ARCH}"
 BUILD_DIR="${ROOT_DIR}/build-macos-app"
 DIST_DIR="${ROOT_DIR}/dist-macos-app"
-PACKAGE_DIR="${DIST_DIR}/BHZN-ToDesk-Agent-mac"
 ZIP_PATH="${DIST_DIR}/BHZN-ToDesk-Agent-mac.zip"
 APP_NAME="BHZN ToDesk Agent"
+HELPER_NAME="bhzn-agent-helper"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
+AGENT_BUILD_DIR="${BUILD_DIR}/agent"
+AGENT_DIST_DIR="${BUILD_DIR}/agent-dist"
+HELPER_DIR="${APP_BUNDLE}/Contents/Resources/agent-bin"
+HELPER_EXECUTABLE="${HELPER_DIR}/${HELPER_NAME}"
 
-rm -rf "${BUILD_DIR}" "${DIST_DIR}"
-mkdir -p "${PACKAGE_DIR}"
+case "${MACOS_ARCH}" in
+  arm64|x86_64|universal2) ;;
+  *)
+    echo "Unsupported MACOS_ARCH=${MACOS_ARCH}; use arm64, x86_64, or universal2." >&2
+    exit 1
+    ;;
+esac
 
-if [ ! -x "${BUILD_VENV}/bin/python" ]; then
-  python3 -m venv "${BUILD_VENV}"
+PYTHON_CMD=(python3)
+if [ "${MACOS_ARCH}" = "x86_64" ]; then
+  PYTHON_CMD=(arch -x86_64 python3)
+elif [ "${MACOS_ARCH}" = "arm64" ]; then
+  PYTHON_CMD=(arch -arm64 python3)
+fi
+VENV_PYTHON_CMD=("${BUILD_VENV}/bin/python")
+if [ "${MACOS_ARCH}" = "x86_64" ]; then
+  VENV_PYTHON_CMD=(arch -x86_64 "${BUILD_VENV}/bin/python")
+elif [ "${MACOS_ARCH}" = "arm64" ]; then
+  VENV_PYTHON_CMD=(arch -arm64 "${BUILD_VENV}/bin/python")
 fi
 
-"${BUILD_VENV}/bin/python" -m pip install --upgrade pip
-"${BUILD_VENV}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt" pyinstaller
+rm -rf "${BUILD_DIR}" "${DIST_DIR}"
+mkdir -p "${DIST_DIR}"
 
-"${BUILD_VENV}/bin/python" -m PyInstaller \
+if [ ! -x "${BUILD_VENV}/bin/python" ]; then
+  "${PYTHON_CMD[@]}" -m venv "${BUILD_VENV}"
+fi
+
+"${VENV_PYTHON_CMD[@]}" -m pip install --upgrade pip
+"${VENV_PYTHON_CMD[@]}" -m pip install --only-binary=:all: \
+  Pillow==10.4.0 \
+  cryptography==42.0.8 \
+  cffi \
+  pyobjc-core \
+  pyobjc-framework-Cocoa \
+  pyobjc-framework-quartz \
+  pyinstaller
+"${VENV_PYTHON_CMD[@]}" -m pip install \
+  mss==9.0.1 \
+  pyautogui==0.9.54 \
+  pyperclip==1.11.0 \
+  websocket-client==1.8.0
+
+"${VENV_PYTHON_CMD[@]}" -m PyInstaller \
   --noconfirm \
   --clean \
-  --windowed \
-  --name "${APP_NAME}" \
-  --osx-bundle-identifier "top.bhzn.todesk.agent" \
-  --distpath "${DIST_DIR}" \
-  --workpath "${BUILD_DIR}" \
+  --console \
+  --target-architecture "${MACOS_ARCH}" \
+  --exclude-module tkinter \
+  --exclude-module _tkinter \
+  --exclude-module tcl \
+  --exclude-module tk \
+  --name "${HELPER_NAME}" \
+  --distpath "${AGENT_DIST_DIR}" \
+  --workpath "${AGENT_BUILD_DIR}" \
   "${ROOT_DIR}/bhzn_desktop_agent.py"
 
-/usr/bin/python3 - <<'PY' "${APP_BUNDLE}"
+mkdir -p "${APP_BUNDLE}/Contents/MacOS" \
+  "${APP_BUNDLE}/Contents/Resources" \
+  "${HELPER_DIR}"
+
+cat > "${APP_BUNDLE}/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>${APP_NAME}</string>
+  <key>CFBundleExecutable</key>
+  <string>${APP_NAME}</string>
+  <key>CFBundleIdentifier</key>
+  <string>top.bhzn.todesk.agent</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>${APP_NAME}</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>${VERSION}</string>
+  <key>CFBundleVersion</key>
+  <string>${VERSION}</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.utilities</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>BHZN ToDesk Agent uses automation only for user-approved remote control actions.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>BHZN ToDesk Agent captures the screen only after the device owner enables remote support.</string>
+</dict>
+</plist>
+PLIST
+
+build_launcher_for_arch() {
+  local arch="$1"
+  local output="$2"
+  /usr/bin/swiftc \
+    -O \
+    -target "${arch}-apple-macos12.3" \
+    -framework Cocoa \
+    -framework ImageIO \
+    -framework ScreenCaptureKit \
+    "${ROOT_DIR}/MacAgentLauncher.swift" \
+    -o "${output}"
+}
+
+if [ "${MACOS_ARCH}" = "universal2" ]; then
+  build_launcher_for_arch arm64 "${BUILD_DIR}/${APP_NAME}-arm64"
+  build_launcher_for_arch x86_64 "${BUILD_DIR}/${APP_NAME}-x86_64"
+  /usr/bin/lipo -create \
+    "${BUILD_DIR}/${APP_NAME}-arm64" \
+    "${BUILD_DIR}/${APP_NAME}-x86_64" \
+    -output "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+else
+  build_launcher_for_arch "${MACOS_ARCH}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+fi
+
+cp -R "${AGENT_DIST_DIR}/${HELPER_NAME}/." "${HELPER_DIR}/"
+chmod +x "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" \
+  "${HELPER_EXECUTABLE}"
+
+/usr/bin/python3 - <<'PY' "${APP_BUNDLE}" "${VERSION}"
 import plistlib
 import sys
 from pathlib import Path
 
 app = Path(sys.argv[1])
+version = sys.argv[2]
 plist_path = app / "Contents" / "Info.plist"
 data = plistlib.loads(plist_path.read_bytes())
 data.update(
@@ -48,8 +157,8 @@ data.update(
         "CFBundleDisplayName": "BHZN ToDesk Agent",
         "CFBundleName": "BHZN ToDesk Agent",
         "CFBundleIdentifier": "top.bhzn.todesk.agent",
-        "CFBundleShortVersionString": "0.1.4",
-        "CFBundleVersion": "0.1.4",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
         "LSApplicationCategoryType": "public.app-category.utilities",
         "NSAppleEventsUsageDescription": "BHZN ToDesk Agent uses automation only for user-approved remote control actions.",
         "NSScreenCaptureUsageDescription": "BHZN ToDesk Agent captures the screen only after the device owner enables remote support.",
@@ -59,41 +168,12 @@ plist_path.write_bytes(plistlib.dumps(data, sort_keys=False))
 PY
 
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "${APP_BUNDLE}" || true
+  codesign --force --sign - --timestamp=none --requirements '=designated => identifier "top.bhzn.todesk.agent"' "${APP_BUNDLE}"
+  codesign --verify --strict --verbose=2 "${APP_BUNDLE}"
 fi
-
-cp -R "${APP_BUNDLE}" "${PACKAGE_DIR}/${APP_NAME}.app"
-cp "${ROOT_DIR}/install-macos.sh" "${PACKAGE_DIR}/install-macos.sh"
-cp "${ROOT_DIR}/uninstall-macos.sh" "${PACKAGE_DIR}/uninstall-macos.sh"
-cp "${ROOT_DIR}/MACOS_UNSIGNED.md" "${PACKAGE_DIR}/README.md"
-
-cat > "${PACKAGE_DIR}/Install.command" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-PACKAGE_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "${PACKAGE_DIR}"
-exec /usr/bin/env bash "${PACKAGE_DIR}/install-macos.sh"
-SH
-
-cat > "${PACKAGE_DIR}/Show-ID.command" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-APP_BIN="${HOME}/Applications/BHZN ToDesk Agent.app/Contents/MacOS/BHZN ToDesk Agent"
-if [ -x "${APP_BIN}" ]; then
-  exec "${APP_BIN}" --show-id
-fi
-echo "BHZN ToDesk Agent is not installed yet."
-echo "Run Install.command first."
-exit 1
-SH
-
-chmod +x "${PACKAGE_DIR}/Install.command" \
-  "${PACKAGE_DIR}/Show-ID.command" \
-  "${PACKAGE_DIR}/install-macos.sh" \
-  "${PACKAGE_DIR}/uninstall-macos.sh"
 
 cd "${DIST_DIR}"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent "BHZN-ToDesk-Agent-mac" "${ZIP_PATH}"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ZIP_PATH}"
 
 echo "Built macOS app package:"
 echo "${ZIP_PATH}"

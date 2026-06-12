@@ -81,6 +81,7 @@
         <div class="stage-tabs">
           <button id="controlTabBtn" class="stage-tab active" type="button">远程控制</button>
           <button id="wallTabBtn" class="stage-tab" type="button">屏幕墙</button>
+          <button id="filesTabBtn" class="stage-tab" type="button">文件传输</button>
         </div>
         <div class="account-menu">
           <button id="accountMenuBtn" class="avatar-button" type="button" aria-haspopup="true" aria-expanded="false">
@@ -93,7 +94,8 @@
             </div>
             <a href="/downloads/bhzn-todesk-debug.apk">下载 Android APK</a>
             <a href="/downloads/BHZN-ToDesk-Agent-Setup.exe">下载 Windows 安装包</a>
-            <a href="/downloads/BHZN-ToDesk-Agent-mac.zip">下载 macOS 内测包</a>
+            <a href="/downloads/BHZN-ToDesk-Agent-mac-arm64.zip">下载 macOS M 系列包</a>
+            <a href="/downloads/BHZN-ToDesk-Agent-mac-x86_64.zip">下载 macOS Intel 包</a>
             <a href="/cms.html" target="_blank" rel="noreferrer">CMS 审核后台</a>
             <button id="logoutBtn" class="menu-danger" type="button">退出登录</button>
           </div>
@@ -165,6 +167,20 @@
             <span class="wall-resize-handle wall-resize-ne" data-wall-resize="ne" aria-hidden="true"></span>
             <span class="wall-resize-handle wall-resize-sw" data-wall-resize="sw" aria-hidden="true"></span>
             <span class="wall-resize-handle wall-resize-se" data-wall-resize="se" aria-hidden="true"></span>
+          </div>
+        </section>
+
+        <section id="fileTransferWorkspace" class="file-transfer-workspace hidden">
+          <header class="file-transfer-toolbar">
+            <div>
+              <strong>文件传输</strong>
+              <span id="fileTransferSummary">暂无传输记录</span>
+            </div>
+          </header>
+          <div id="fileTransferTable" class="file-transfer-table"></div>
+          <div id="fileTransferEmpty" class="file-transfer-empty">
+            <strong>暂无文件记录</strong>
+            <span>左侧上传并下发文件后，这里会显示设备接收状态和保存路径。</span>
           </div>
         </section>
       </div>

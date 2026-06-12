@@ -72,8 +72,8 @@ if [ -x "${APP_BIN}" ]; then
 fi
 exec /usr/bin/env bash "${PACKAGE_DIR}/run-macos.sh" --show-id
 """
-    (PACKAGE_DIR / "Install.command").write_text(install_command, encoding="utf-8", newline="\n")
-    (PACKAGE_DIR / "Show-ID.command").write_text(show_id_command, encoding="utf-8", newline="\n")
+    (PACKAGE_DIR / "Install.command").write_text(install_command, encoding="utf-8")
+    (PACKAGE_DIR / "Show-ID.command").write_text(show_id_command, encoding="utf-8")
 
     for name in EXECUTABLE_NAMES:
         path = PACKAGE_DIR / name

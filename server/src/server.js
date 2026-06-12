@@ -22,6 +22,9 @@ const DEFAULT_ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026";
 const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.7-rs";
 const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
+const MAC_AGENT_VERSION = process.env.MAC_AGENT_VERSION || "0.1.19";
+const MAC_AGENT_ARM64_FILE = process.env.MAC_AGENT_ARM64_FILE || "BHZN-ToDesk-Agent-mac-arm64.zip";
+const MAC_AGENT_X86_64_FILE = process.env.MAC_AGENT_X86_64_FILE || "BHZN-ToDesk-Agent-mac-x86_64.zip";
 const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 100 * 1024 * 1024);
 const FILE_TRANSFER_TTL_MS = Number(process.env.FILE_TRANSFER_TTL_MS || 24 * 60 * 60 * 1000);
 const FILE_TRANSFER_DIR = path.join(DATA_DIR, "file-transfers");
@@ -587,7 +590,7 @@ function stopControllerSession(sessionId, reason, options = {}) {
   if (device) {
     device.controllers.delete(sessionId);
     if (notifyDevice && device.ws.readyState === WebSocket.OPEN) {
-      send(device.ws, { type: "stop-control", sessionId, reason });
+      send(device.ws, { type: "stop-control", sessionId, reason, controllerCount: device.controllers.size });
     }
   }
   if (notifyController && controller.ws.readyState === WebSocket.OPEN) {
@@ -629,7 +632,7 @@ function attachController(device, ws) {
     controllerCount: device.controllers.size
   });
   send(ws, { type: "control-ready", sessionId, device: deviceView(device) });
-  send(device.ws, { type: "control-request", sessionId });
+  send(device.ws, { type: "control-request", sessionId, controllerCount: device.controllers.size });
   broadcastDeviceOwners(device.id);
 }
 
@@ -697,6 +700,33 @@ app.get("/api/releases/windows-agent", (req, res) => {
     size: stat.size,
     updatedAt: stat.mtime.toISOString()
   });
+});
+
+function releaseFileView(req, platform, arch, version, fileName) {
+  const filePath = path.join(PUBLIC_DIR, "downloads", fileName);
+  if (!fs.existsSync(filePath)) return null;
+  const stat = fs.statSync(filePath);
+  return {
+    platform,
+    arch,
+    version,
+    url: `${publicBaseUrl(req)}/downloads/${encodeURIComponent(fileName)}`,
+    sha256: fileSha256(filePath),
+    size: stat.size,
+    updatedAt: stat.mtime.toISOString()
+  };
+}
+
+app.get("/api/releases/macos-agent", (req, res) => {
+  const releases = [
+    releaseFileView(req, "macos", "arm64", MAC_AGENT_VERSION, MAC_AGENT_ARM64_FILE),
+    releaseFileView(req, "macos", "x86_64", MAC_AGENT_VERSION, MAC_AGENT_X86_64_FILE)
+  ].filter(Boolean);
+  if (!releases.length) {
+    res.status(404).json({ error: "release_not_found" });
+    return;
+  }
+  res.json({ platform: "macos", version: MAC_AGENT_VERSION, releases });
 });
 
 app.post("/api/auth/register", (req, res) => {
@@ -865,11 +895,17 @@ app.post("/api/control/:id", requireApprovedUser, (req, res) => {
     res.status(404).json({ error: "device_offline", device: bindingView(binding) });
     return;
   }
-  if (!canViewDevice(device)) {
-    res.status(409).json({ error: "screen_not_ready", device: deviceView(device) });
-    return;
-  }
   res.json({ ok: true, device: deviceView(device) });
+});
+
+app.get("/api/file-transfers", requireApprovedUser, (req, res) => {
+  pruneFileTransfers();
+  const transfers = Array.from(fileTransfers.values())
+    .filter((transfer) => transfer.userId === req.auth.user.id)
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+    .slice(0, 100)
+    .map(transferView);
+  res.json({ transfers });
 });
 
 app.post("/api/file-transfers", requireApprovedUser, express.raw({
@@ -1229,10 +1265,6 @@ wss.on("connection", (ws) => {
           send(ws, { type: "error", error: "device_offline", device: bindingView(binding) });
           return;
         }
-        if (!canViewDevice(device)) {
-          send(ws, { type: "error", error: "screen_not_ready", device: deviceView(device) });
-          return;
-        }
         attachController(device, ws);
         return;
       }
@@ -1301,11 +1333,22 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.type === "frame-ack") {
+        const sessionId = String(msg.sessionId || "");
+        const controller = controllers.get(sessionId);
+        if (!controller || controller.ws !== ws || controller.userId !== ws.userId) return;
+        const device = devices.get(controller.deviceId);
+        if (!device || device.id !== String(msg.deviceId || "") || device.ws.readyState !== WebSocket.OPEN) return;
         ws.lastFrameAck = {
-          deviceId: String(msg.deviceId || ""),
+          deviceId: device.id,
           frameId: msg.frameId || 0,
           timestamp: now()
         };
+        send(device.ws, {
+          type: "frame-ack",
+          sessionId,
+          frameId: msg.frameId || 0,
+          controllerCount: device.controllers.size
+        });
         return;
       }
 

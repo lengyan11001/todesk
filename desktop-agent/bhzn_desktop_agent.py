@@ -1,16 +1,20 @@
 import argparse
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import platform
 import queue
 import random
+import re
 import socket
 import string
 import sys
 import threading
 import time
+import urllib.request
+import struct
 from urllib.parse import urlparse
 try:
     import tkinter as tk
@@ -26,12 +30,16 @@ import pyautogui
 import pyperclip
 import websocket
 from PIL import Image
+try:
+    import Quartz
+except Exception:
+    Quartz = None
 
 
 APP_NAME = "BHZN ToDesk Desktop Agent"
-AGENT_VERSION = "0.1.4"
-FRAME_INTERVAL = 0.075
-DRAG_FRAME_INTERVAL = 0.03
+AGENT_VERSION = "0.1.19"
+FRAME_INTERVAL = 0.10
+DRAG_FRAME_INTERVAL = 0.05
 HEARTBEAT_INTERVAL = 15.0
 JPEG_QUALITY = 45
 DRAG_JPEG_QUALITY = 34
@@ -40,6 +48,13 @@ DRAG_MAX_SIDE = 1280
 RECONNECT_MIN = 1.5
 RECONNECT_MAX = 30.0
 DRAG_FAST_MODE_SECONDS = 0.8
+MAX_FILE_TRANSFER_BYTES = 100 * 1024 * 1024
+MAX_IN_FLIGHT_FRAMES = 2
+FRAME_BACKPRESSURE_GRACE = 1.25
+FRAME_BACKPRESSURE_PAUSE = 0.75
+APPLICATION_SERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+BINARY_FRAME_MAGIC = b"BHZF1"
+BINARY_FRAME_HEADER_LIMIT = 64 * 1024
 
 
 def reveal_text(values, key: int) -> str:
@@ -131,6 +146,51 @@ def platform_name() -> str:
     return system or "desktop"
 
 
+def accessibility_permission_available() -> bool:
+    if platform_name() != "macos":
+        return True
+    try:
+        app_services = ctypes.cdll.LoadLibrary(APPLICATION_SERVICES)
+        app_services.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(app_services.AXIsProcessTrusted())
+    except Exception:
+        return False
+
+
+def request_accessibility_permission() -> bool:
+    if platform_name() != "macos":
+        return True
+    try:
+        app_services = ctypes.cdll.LoadLibrary(APPLICATION_SERVICES)
+        core_foundation = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        app_services.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        app_services.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        core_foundation.CFDictionaryCreate.restype = ctypes.c_void_p
+        core_foundation.CFDictionaryCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+
+        prompt_key = ctypes.c_void_p.in_dll(app_services, "kAXTrustedCheckOptionPrompt")
+        true_value = ctypes.c_void_p.in_dll(core_foundation, "kCFBooleanTrue")
+        keys = (ctypes.c_void_p * 1)(prompt_key)
+        values = (ctypes.c_void_p * 1)(true_value)
+        options = core_foundation.CFDictionaryCreate(None, keys, values, 1, None, None)
+        if not options:
+            return accessibility_permission_available()
+        try:
+            return bool(app_services.AXIsProcessTrustedWithOptions(options))
+        finally:
+            core_foundation.CFRelease(options)
+    except Exception:
+        return accessibility_permission_available()
+
+
 class AgentConfig:
     def __init__(self, path: Path, data: dict):
         self.path = path
@@ -176,18 +236,60 @@ def default_device_name() -> str:
     return f"BHZN Desktop {host}"
 
 
+def file_receive_dir() -> Path:
+    return Path.home() / "Downloads" / "BHZN-ToDesk"
+
+
+def safe_file_name(value: str) -> str:
+    name = Path(str(value or "file.bin").replace("\\", "/")).name.strip()
+    name = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "_", name).strip(". ")
+    return name or "file.bin"
+
+
+def unique_file_path(directory: Path, file_name: str) -> Path:
+    clean = safe_file_name(file_name)
+    path = directory / clean
+    if not path.exists():
+        return path
+    stem = path.stem or "file"
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = directory / f"{stem} ({index}){suffix}"
+        if not candidate.exists():
+            return candidate
+    return directory / f"{int(time.time())}-{clean}"
+
+
+def is_allowed_file_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme == "http" and (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return False
+
+
 class DesktopAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.ws = None
         self.running = True
         self.connected = False
-        self.capture_enabled = True
-        self.control_enabled = True
+        self.capture_enabled = False
+        self.bridge_screen_trusted = os.environ.get("BHZN_MAC_SCREEN_TRUSTED") == "1"
+        self.bridge_input_trusted = os.environ.get("BHZN_MAC_INPUT_TRUSTED") == "1"
+        self.control_enabled = self.input_permission_available()
         self.screen = {"width": 0, "height": 0, "inputWidth": 0, "inputHeight": 0}
         self.input_origin = {"x": 0, "y": 0}
         self.input_queue: queue.Queue[dict] = queue.Queue(maxsize=512)
         self.capture_thread = None
+        self.capture_requested = False
+        self.control_sessions: set[str] = set()
+        self.frame_id = 0
+        self.frame_lock = threading.Lock()
+        self.frames_in_flight: dict[int, float] = {}
+        self.last_frame_ack_at = 0.0
+        self.bridge_input_thread = None
         self.heartbeat_thread = None
         self.dragging = False
         self.drag_button = "left"
@@ -195,6 +297,9 @@ class DesktopAgent:
         self.pointer_pos = None
         self.input_thread = threading.Thread(target=self.input_loop, daemon=True)
         self.input_thread.start()
+        if self.macos_capture_bridge_enabled():
+            self.bridge_input_thread = threading.Thread(target=self.bridge_input_loop, daemon=True)
+            self.bridge_input_thread.start()
 
     def run(self):
         delay = RECONNECT_MIN
@@ -231,10 +336,16 @@ class DesktopAgent:
 
     def on_open(self, _ws):
         self.connected = True
+        self.capture_requested = False
+        self.capture_enabled = self.screen_permission_available()
+        self.control_enabled = self.input_permission_available()
         print("[agent] connected", flush=True)
+        print(
+            "[agent] screen capture permission: "
+            + ("available" if self.capture_enabled else "not granted"),
+            flush=True,
+        )
         self.send_status("hello-device")
-        self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
-        self.capture_thread.start()
         self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
 
@@ -256,14 +367,22 @@ class DesktopAgent:
             print(f"[agent] device online id={self.config.device_id}", flush=True)
             return
         if msg_type == "control-request":
+            self.add_control_session(msg)
             self.send_status("status")
             return
         if msg_type == "stop-control":
+            self.remove_control_session(msg)
             self.send_status("status")
+            return
+        if msg_type == "frame-ack":
+            self.handle_frame_ack(msg)
             return
         if msg_type == "server-replaced":
             print("[agent] another client replaced this device session", flush=True)
             self.close()
+            return
+        if msg_type == "file-transfer":
+            self.start_file_transfer(msg)
             return
         if msg_type == "input":
             try:
@@ -273,6 +392,10 @@ class DesktopAgent:
 
     def close(self):
         self.connected = False
+        self.capture_requested = False
+        self.control_sessions.clear()
+        self.reset_frame_backpressure()
+        self.stop_macos_capture_bridge()
         self.release_drag()
         if self.ws:
             self.ws.close()
@@ -287,6 +410,22 @@ class DesktopAgent:
         except Exception as exc:
             self.connected = False
             print(f"[agent] send failed: {exc}", flush=True)
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return False
+
+    def send_binary(self, payload: bytes) -> bool:
+        ws = self.ws
+        if not ws or not self.connected:
+            return False
+        try:
+            ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
+            return True
+        except Exception as exc:
+            self.connected = False
+            print(f"[agent] binary send failed: {exc}", flush=True)
             try:
                 ws.close()
             except Exception:
@@ -312,47 +451,387 @@ class DesktopAgent:
         }
 
     def send_status(self, msg_type: str = "status"):
+        self.capture_enabled = self.screen_permission_available()
+        self.control_enabled = self.input_permission_available()
         self.send_json(self.base_status(msg_type))
+
+    def macos_capture_bridge_enabled(self) -> bool:
+        return platform_name() == "macos" and os.environ.get("BHZN_MAC_CAPTURE_BRIDGE") == "1"
+
+    def input_permission_available(self) -> bool:
+        if platform_name() != "macos":
+            return accessibility_permission_available()
+        if os.environ.get("BHZN_MAC_INPUT_BRIDGE") == "1":
+            return self.bridge_input_trusted
+        return accessibility_permission_available()
+
+    def send_file_transfer_status(self, transfer_id: str, status: str, path: str = "", bytes_count: int = 0, error: str = ""):
+        self.send_json(
+            {
+                "type": "file-transfer-status",
+                "transferId": transfer_id,
+                "status": status,
+                "path": path,
+                "bytes": max(0, int(bytes_count or 0)),
+                "error": str(error or "")[:400],
+            }
+        )
+
+    def start_file_transfer(self, msg: dict):
+        transfer_id = str(msg.get("transferId") or "")
+        if not transfer_id:
+            return
+        self.send_file_transfer_status(transfer_id, "downloading")
+        thread = threading.Thread(target=self.receive_file_transfer, args=(msg,), daemon=True)
+        thread.start()
+
+    def receive_file_transfer(self, msg: dict):
+        transfer_id = str(msg.get("transferId") or "")
+        file_name = safe_file_name(str(msg.get("fileName") or "file.bin"))
+        path = ""
+        try:
+            expected_size = int(msg.get("size") or 0)
+            expected_sha256 = str(msg.get("sha256") or "").lower()
+            url = str(msg.get("url") or "")
+            if expected_size <= 0:
+                raise ValueError("empty file")
+            if expected_size > MAX_FILE_TRANSFER_BYTES:
+                raise ValueError("file too large")
+            if len(expected_sha256) != 64 or any(ch not in string.hexdigits for ch in expected_sha256):
+                raise ValueError("bad sha256")
+            if not is_allowed_file_url(url):
+                raise ValueError("file transfer requires https url")
+
+            target_dir = file_receive_dir()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = unique_file_path(target_dir, file_name)
+            temp_path = target_path.with_name(target_path.name + ".download")
+            hasher = hashlib.sha256()
+            downloaded = 0
+            request = urllib.request.Request(url, headers={"User-Agent": f"BHZN-ToDesk-Agent/{AGENT_VERSION}"})
+            with urllib.request.urlopen(request, timeout=60) as response, temp_path.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    if downloaded > expected_size:
+                        raise ValueError("file larger than expected")
+                    hasher.update(chunk)
+                    output.write(chunk)
+            if downloaded != expected_size:
+                raise ValueError(f"file size mismatch expected={expected_size} actual={downloaded}")
+            if hasher.hexdigest().lower() != expected_sha256:
+                raise ValueError("file sha256 mismatch")
+            temp_path.replace(target_path)
+            path = str(target_path)
+            print(f"[agent] file saved {path}", flush=True)
+            print(
+                "__BHZN_FILE_RECEIVED__"
+                + json.dumps(
+                    {"path": path, "fileName": target_path.name, "bytes": downloaded},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            self.send_file_transfer_status(transfer_id, "saved", path=path, bytes_count=downloaded)
+        except Exception as exc:
+            try:
+                if "temp_path" in locals() and temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            print(f"[agent] file transfer failed: {exc}", flush=True)
+            self.send_file_transfer_status(transfer_id, "failed", path=path, error=str(exc))
 
     def heartbeat_loop(self):
         while self.running and self.connected:
             time.sleep(HEARTBEAT_INTERVAL)
+            self.capture_enabled = self.screen_permission_available()
             self.send_status("heartbeat")
+
+    def screen_permission_available(self) -> bool:
+        if platform_name() != "macos":
+            return True
+        if self.macos_capture_bridge_enabled():
+            return self.bridge_screen_trusted
+        if Quartz is None or not hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
+            return False
+        try:
+            return bool(Quartz.CGPreflightScreenCaptureAccess())
+        except Exception:
+            return False
+
+    def add_control_session(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "").strip()
+        if session_id:
+            self.control_sessions.add(session_id)
+        controller_count = self.controller_count_from_message(msg)
+        if controller_count <= 0 and session_id:
+            controller_count = len(self.control_sessions)
+        if controller_count > len(self.control_sessions) and not session_id:
+            self.control_sessions.add("__unknown__")
+        self.start_capture()
+
+    def remove_control_session(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "").strip()
+        if session_id:
+            self.control_sessions.discard(session_id)
+        controller_count = self.controller_count_from_message(msg)
+        if controller_count <= 0:
+            self.control_sessions.clear()
+        elif len(self.control_sessions) > controller_count:
+            self.control_sessions = set(list(self.control_sessions)[:controller_count])
+        if controller_count > 0 and not self.control_sessions:
+            self.control_sessions.add("__unknown__")
+        if self.control_sessions or controller_count > 0:
+            self.capture_requested = True
+            return
+        self.capture_requested = False
+        self.reset_frame_backpressure()
+        self.stop_macos_capture_bridge()
+
+    @staticmethod
+    def controller_count_from_message(msg: dict) -> int:
+        try:
+            return max(0, int(msg.get("controllerCount") or 0))
+        except Exception:
+            return 0
+
+    def next_frame_id(self) -> int:
+        with self.frame_lock:
+            self.frame_id += 1
+            return self.frame_id
+
+    def reset_frame_backpressure(self):
+        with self.frame_lock:
+            self.frames_in_flight.clear()
+            self.last_frame_ack_at = 0.0
+
+    def note_frame_sent(self, frame_id: int):
+        with self.frame_lock:
+            now = time.time()
+            self.frames_in_flight[frame_id] = now
+            stale_before = now - FRAME_BACKPRESSURE_GRACE
+            for old_frame_id, sent_at in list(self.frames_in_flight.items()):
+                if sent_at < stale_before:
+                    self.frames_in_flight.pop(old_frame_id, None)
+
+    def handle_frame_ack(self, msg: dict):
+        try:
+            frame_id = int(msg.get("frameId") or 0)
+        except Exception:
+            frame_id = 0
+        with self.frame_lock:
+            self.last_frame_ack_at = time.time()
+            if frame_id:
+                for old_frame_id in list(self.frames_in_flight):
+                    if old_frame_id <= frame_id:
+                        self.frames_in_flight.pop(old_frame_id, None)
+
+    def should_pause_for_frame_backpressure(self) -> bool:
+        if not self.control_sessions:
+            return True
+        with self.frame_lock:
+            now = time.time()
+            stale_before = now - FRAME_BACKPRESSURE_GRACE
+            for frame_id, sent_at in list(self.frames_in_flight.items()):
+                if sent_at < stale_before:
+                    self.frames_in_flight.pop(frame_id, None)
+            return len(self.frames_in_flight) >= MAX_IN_FLIGHT_FRAMES
+
+    def start_capture(self):
+        self.capture_requested = True
+        if not self.screen_permission_available():
+            self.capture_enabled = False
+            self.send_status("status")
+            print("[agent] screen capture permission is not granted", flush=True)
+            return
+        self.capture_enabled = True
+        if self.capture_thread and self.capture_thread.is_alive():
+            return
+        if self.macos_capture_bridge_enabled():
+            self.capture_thread = threading.Thread(target=self.capture_bridge_loop, daemon=True)
+            self.capture_thread.start()
+            return
+        self.capture_thread = threading.Thread(target=self.capture_loop, daemon=True)
+        self.capture_thread.start()
+
+    def capture_bridge_loop(self):
+        bridge_started = False
+        try:
+            while self.running and self.connected and self.capture_requested:
+                if self.should_pause_for_frame_backpressure():
+                    if bridge_started:
+                        self.stop_macos_capture_bridge()
+                        bridge_started = False
+                    time.sleep(FRAME_BACKPRESSURE_PAUSE)
+                    continue
+                if not bridge_started:
+                    self.start_macos_capture_bridge()
+                    bridge_started = True
+                time.sleep(0.2)
+        finally:
+            if bridge_started:
+                self.stop_macos_capture_bridge()
+
+    def start_macos_capture_bridge(self):
+        print("__BHZN_CAPTURE__" + json.dumps({"action": "start"}, separators=(",", ":")), flush=True)
+
+    def stop_macos_capture_bridge(self):
+        if self.macos_capture_bridge_enabled():
+            print("__BHZN_CAPTURE__" + json.dumps({"action": "stop"}, separators=(",", ":")), flush=True)
+
+    def bridge_input_loop(self):
+        while self.running:
+            try:
+                line = sys.stdin.buffer.readline()
+            except Exception:
+                break
+            if not line:
+                break
+            line = line.rstrip(b"\r\n")
+            if line.startswith(b"__BHZN_FRAME_BYTES__"):
+                try:
+                    payload = json.loads(line[len(b"__BHZN_FRAME_BYTES__") :].decode("utf-8"))
+                    byte_count = max(0, min(20_000_000, int(payload.get("bytes") or 0)))
+                    if byte_count <= 0:
+                        continue
+                    image = sys.stdin.buffer.read(byte_count)
+                    if len(image) != byte_count:
+                        break
+                    if self.should_pause_for_frame_backpressure():
+                        continue
+                    self.send_bridge_binary_frame(payload, image)
+                except Exception as exc:
+                    self.capture_enabled = False
+                    print(f"[agent] bridge binary frame failed: {exc}", flush=True)
+                continue
+            if not line.startswith(b"__BHZN_FRAME__"):
+                if line.startswith(b"__BHZN_PERMISSION__"):
+                    self.handle_bridge_permission(line[len(b"__BHZN_PERMISSION__") :].decode("utf-8", errors="replace"))
+                continue
+            try:
+                payload = json.loads(line[len(b"__BHZN_FRAME__") :].decode("utf-8"))
+                if self.should_pause_for_frame_backpressure():
+                    continue
+                self.send_bridge_frame(payload)
+            except Exception as exc:
+                self.capture_enabled = False
+                print(f"[agent] bridge frame failed: {exc}", flush=True)
+
+    def handle_bridge_permission(self, json_text: str):
+        try:
+            payload = json.loads(json_text)
+        except Exception:
+            return
+        old_screen = self.bridge_screen_trusted
+        old_input = self.bridge_input_trusted
+        self.bridge_screen_trusted = bool(payload.get("screen"))
+        self.bridge_input_trusted = bool(payload.get("input"))
+        if old_screen == self.bridge_screen_trusted and old_input == self.bridge_input_trusted:
+            return
+        self.capture_enabled = self.screen_permission_available()
+        self.control_enabled = self.input_permission_available()
+        self.send_status("status")
+        if self.capture_requested and self.capture_enabled and not (self.capture_thread and self.capture_thread.is_alive()):
+            self.start_capture()
+
+    def send_bridge_frame(self, payload: dict):
+        if not self.control_sessions:
+            return
+        image = str(payload.get("image") or "")
+        width = int(payload.get("width") or 0)
+        height = int(payload.get("height") or 0)
+        input_width = int(payload.get("inputWidth") or width)
+        input_height = int(payload.get("inputHeight") or height)
+        if not image or width <= 0 or height <= 0:
+            return
+        self.screen = {
+            "width": width,
+            "height": height,
+            "inputWidth": input_width,
+            "inputHeight": input_height,
+        }
+        self.input_origin = {"x": 0, "y": 0}
+        self.capture_enabled = True
+        frame_id = self.next_frame_id()
+        if self.send_json(
+            {
+                "type": "frame",
+                "frameId": frame_id,
+                "image": image,
+                "width": width,
+                "height": height,
+                "timestamp": int(payload.get("timestamp") or time.time() * 1000),
+            }
+        ):
+            self.note_frame_sent(frame_id)
+
+    def send_bridge_binary_frame(self, payload: dict, image: bytes):
+        if not self.control_sessions:
+            return
+        width = int(payload.get("width") or 0)
+        height = int(payload.get("height") or 0)
+        input_width = int(payload.get("inputWidth") or width)
+        input_height = int(payload.get("inputHeight") or height)
+        if not image or width <= 0 or height <= 0:
+            return
+        self.screen = {
+            "width": width,
+            "height": height,
+            "inputWidth": input_width,
+            "inputHeight": input_height,
+        }
+        self.input_origin = {"x": 0, "y": 0}
+        self.capture_enabled = True
+        frame_id = self.next_frame_id()
+        header = {
+            "frameId": frame_id,
+            "frameKind": "jpeg",
+            "width": width,
+            "height": height,
+            "inputWidth": input_width,
+            "inputHeight": input_height,
+            "timestamp": int(payload.get("timestamp") or time.time() * 1000),
+        }
+        encoded_header = json.dumps(header, separators=(",", ":")).encode("utf-8")
+        if len(encoded_header) > BINARY_FRAME_HEADER_LIMIT:
+            return
+        packet = BINARY_FRAME_MAGIC + struct.pack("<I", len(encoded_header)) + encoded_header + image
+        if self.send_binary(packet):
+            self.note_frame_sent(frame_id)
 
     def capture_loop(self):
         last_error_at = 0.0
-        with mss.mss() as sct:
-            while self.running and self.connected:
+        use_quartz_capture = self.quartz_capture_available()
+        sct = None
+        try:
+            if not use_quartz_capture:
+                sct = mss.mss()
+            while self.running and self.connected and self.capture_requested:
+                if self.should_pause_for_frame_backpressure():
+                    time.sleep(FRAME_BACKPRESSURE_PAUSE)
+                    continue
                 start = time.time()
                 fast_frame = start < self.fast_frame_until
                 try:
-                    monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                    shot = sct.grab(monitor)
-                    self.screen = {
-                        "width": 0,
-                        "height": 0,
-                        "inputWidth": int(monitor["width"]),
-                        "inputHeight": int(monitor["height"]),
-                    }
-                    self.input_origin = {
-                        "x": int(monitor.get("left", 0)),
-                        "y": int(monitor.get("top", 0)),
-                    }
-                    image = Image.frombytes("RGB", shot.size, shot.rgb)
-                    image = self.resize_for_wire(image, DRAG_MAX_SIDE if fast_frame else MAX_SIDE)
-                    self.screen["width"], self.screen["height"] = image.size
-                    encoded = self.encode_jpeg(image, DRAG_JPEG_QUALITY if fast_frame else JPEG_QUALITY)
-                    self.capture_enabled = True
-                    self.send_json(
-                        {
-                            "type": "frame",
-                            "image": encoded,
-                            "width": image.size[0],
-                            "height": image.size[1],
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
+                    if use_quartz_capture:
+                        image, monitor = self.capture_quartz_display()
+                    else:
+                        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                        shot = sct.grab(monitor)
+                        image = Image.frombytes("RGB", shot.size, shot.rgb)
+                    self.send_frame(image, monitor, fast_frame)
                 except Exception as exc:
+                    if not use_quartz_capture and self.quartz_capture_available():
+                        use_quartz_capture = True
+                        now = time.time()
+                        if now - last_error_at > 5:
+                            print(f"[agent] mss capture failed, switching to Quartz capture: {exc}", flush=True)
+                            last_error_at = now
+                        continue
                     self.capture_enabled = False
                     now = time.time()
                     if now - last_error_at > 5:
@@ -362,6 +841,65 @@ class DesktopAgent:
                 elapsed = time.time() - start
                 target_interval = DRAG_FRAME_INTERVAL if fast_frame else FRAME_INTERVAL
                 time.sleep(max(0.001, target_interval - elapsed))
+        finally:
+            if sct is not None:
+                try:
+                    sct.close()
+                except Exception:
+                    pass
+
+    def send_frame(self, image: Image.Image, monitor: dict, fast_frame: bool):
+        self.screen = {
+            "width": 0,
+            "height": 0,
+            "inputWidth": int(monitor["width"]),
+            "inputHeight": int(monitor["height"]),
+        }
+        self.input_origin = {
+            "x": int(monitor.get("left", 0)),
+            "y": int(monitor.get("top", 0)),
+        }
+        image = self.resize_for_wire(image, DRAG_MAX_SIDE if fast_frame else MAX_SIDE)
+        self.screen["width"], self.screen["height"] = image.size
+        encoded = self.encode_jpeg(image, DRAG_JPEG_QUALITY if fast_frame else JPEG_QUALITY)
+        self.capture_enabled = True
+        frame_id = self.next_frame_id()
+        if self.send_json(
+            {
+                "type": "frame",
+                "frameId": frame_id,
+                "image": encoded,
+                "width": image.size[0],
+                "height": image.size[1],
+                "timestamp": int(time.time() * 1000),
+            }
+        ):
+            self.note_frame_sent(frame_id)
+
+    @staticmethod
+    def quartz_capture_available() -> bool:
+        return (
+            platform_name() == "macos"
+            and Quartz is not None
+            and hasattr(Quartz, "CGMainDisplayID")
+            and hasattr(Quartz, "CGDisplayCreateImage")
+            and hasattr(Quartz, "CGImageGetDataProvider")
+            and hasattr(Quartz, "CGDataProviderCopyData")
+        )
+
+    def capture_quartz_display(self) -> tuple[Image.Image, dict]:
+        display_id = Quartz.CGMainDisplayID()
+        cg_image = Quartz.CGDisplayCreateImage(display_id)
+        if cg_image is None:
+            raise RuntimeError("Quartz CGDisplayCreateImage failed")
+        width = int(Quartz.CGImageGetWidth(cg_image))
+        height = int(Quartz.CGImageGetHeight(cg_image))
+        bytes_per_row = int(Quartz.CGImageGetBytesPerRow(cg_image))
+        provider = Quartz.CGImageGetDataProvider(cg_image)
+        data = Quartz.CGDataProviderCopyData(provider)
+        image = Image.frombuffer("RGB", (width, height), bytes(data), "raw", "BGRX", bytes_per_row, 1)
+        monitor = {"left": 0, "top": 0, "width": width, "height": height}
+        return image, monitor
 
     def resize_for_wire(self, image: Image.Image, max_side_limit: int = MAX_SIDE) -> Image.Image:
         width, height = image.size
@@ -383,10 +921,28 @@ class DesktopAgent:
             try:
                 self.handle_input(msg)
                 self.control_enabled = True
+                self.send_input_result(msg, True)
             except Exception as exc:
                 self.control_enabled = False
                 print(f"[agent] input failed: {exc}", flush=True)
+                self.send_input_result(msg, False, str(exc))
                 self.send_status("status")
+
+    def send_input_result(self, msg: dict, ok: bool, error: str = ""):
+        input_id = str(msg.get("inputId") or "")
+        session_id = str(msg.get("sessionId") or "")
+        if not input_id and not session_id:
+            return
+        self.send_json(
+            {
+                "type": "input-result",
+                "sessionId": session_id,
+                "inputId": input_id,
+                "action": str(msg.get("action") or ""),
+                "ok": bool(ok),
+                "error": str(error or "")[:400],
+            }
+        )
 
     def scale_x(self, value) -> int:
         return self.scale_axis(value, self.screen.get("width"), self.screen.get("inputWidth"))
@@ -414,6 +970,10 @@ class DesktopAgent:
         x2 = self.scale_x(msg.get("x2", 0))
         y2 = self.scale_y(msg.get("y2", 0))
         button = self.normalize_button(msg.get("button") or "left")
+
+        if platform_name() == "macos" and os.environ.get("BHZN_MAC_INPUT_BRIDGE") == "1":
+            self.send_macos_input_bridge(msg, action, x, y, x2, y2, duration, button)
+            return
 
         if action == "tap":
             self.click(x, y, button=button)
@@ -464,6 +1024,24 @@ class DesktopAgent:
             text = str(msg.get("text") or "")
             if text:
                 self.input_text(text)
+
+    def send_macos_input_bridge(self, msg: dict, action: str, x: int, y: int, x2: int, y2: int, duration: float, button: str):
+        payload = {
+            "type": "input",
+            "action": action,
+            "x": int(x),
+            "y": int(y),
+            "x2": int(x2),
+            "y2": int(y2),
+            "durationMs": int(max(10, min(5000, duration * 1000))),
+            "button": button,
+            "deltaX": int(msg.get("deltaX") or 0),
+            "deltaY": int(msg.get("deltaY") or 0),
+            "key": str(msg.get("key") or ""),
+            "text": str(msg.get("text") or ""),
+            "modifiers": [str(item).lower() for item in msg.get("modifiers") or []],
+        }
+        print("__BHZN_INPUT__" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
 
     @staticmethod
     def normalize_button(value: str) -> str:
@@ -604,6 +1182,10 @@ def parse_args(argv):
     parser.add_argument("--config", default="", help="Custom config file path")
     parser.add_argument("--show-id", action="store_true", help="Print saved device id/code and exit")
     parser.add_argument("--nogui", action="store_true", help="Run without the desktop status window")
+    parser.add_argument("--request-screen-permission", action="store_true", help="Trigger one macOS screen capture permission check and exit")
+    parser.add_argument("--check-screen-permission", action="store_true", help="Check macOS screen capture permission without prompting")
+    parser.add_argument("--request-accessibility-permission", action="store_true", help="Trigger one macOS accessibility permission request and exit")
+    parser.add_argument("--check-accessibility-permission", action="store_true", help="Check macOS accessibility permission without prompting")
     return parser.parse_args(argv)
 
 
@@ -718,6 +1300,35 @@ def main(argv=None):
     print(f"配置文件: {config.path}", flush=True)
     if args.show_id:
         return 0
+    if args.check_screen_permission:
+        if platform_name() != "macos" or Quartz is None or not hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
+            print("Screen capture permission check is not available.", flush=True)
+            return 1
+        granted = bool(Quartz.CGPreflightScreenCaptureAccess())
+        print("Screen capture permission is available." if granted else "Screen capture permission is not granted.", flush=True)
+        return 0 if granted else 1
+    if args.request_screen_permission:
+        if platform_name() == "macos" and Quartz is not None and hasattr(Quartz, "CGRequestScreenCaptureAccess"):
+            granted = bool(Quartz.CGRequestScreenCaptureAccess())
+            print("Screen capture permission is available." if granted else "Screen capture permission request was opened.", flush=True)
+            return 0 if granted else 1
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                sct.grab(monitor)
+            print("Screen capture permission is available.", flush=True)
+            return 0
+        except Exception as exc:
+            print(f"Screen capture permission check failed: {exc}", flush=True)
+            return 1
+    if args.check_accessibility_permission:
+        granted = accessibility_permission_available()
+        print("Accessibility permission is available." if granted else "Accessibility permission is not granted.", flush=True)
+        return 0 if granted else 1
+    if args.request_accessibility_permission:
+        granted = request_accessibility_permission()
+        print("Accessibility permission is available." if granted else "Accessibility permission request was opened.", flush=True)
+        return 0 if granted else 1
     if not args.nogui and tk is not None:
         gui = AgentGui(config)
         gui.run()

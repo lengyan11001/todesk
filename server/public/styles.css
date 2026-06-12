@@ -359,7 +359,15 @@ input[type="file"] {
   grid-template-rows: 1fr;
 }
 
+.stage-body.files-mode {
+  grid-template-rows: 1fr;
+}
+
 .stage-body.wall-mode .device-shelf {
+  display: none;
+}
+
+.stage-body.files-mode .device-shelf {
   display: none;
 }
 
@@ -578,6 +586,14 @@ input[type="file"] {
   gap: 16px;
 }
 
+.file-transfer-workspace {
+  min-height: 0;
+  padding: 22px 28px 28px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+}
+
 .wall-toolbar {
   background: #fff;
   border: 1px solid var(--line);
@@ -585,15 +601,126 @@ input[type="file"] {
   padding: 14px 16px;
 }
 
+.file-transfer-toolbar {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
 .wall-toolbar strong,
-.wall-toolbar span {
+.wall-toolbar span,
+.file-transfer-toolbar strong,
+.file-transfer-toolbar span {
   display: block;
 }
 
-.wall-toolbar span {
+.wall-toolbar span,
+.file-transfer-toolbar span {
   color: var(--muted);
   font-size: 13px;
   margin-top: 3px;
+}
+
+.file-transfer-table {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.file-transfer-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 8px 18px rgba(20, 52, 92, .06);
+}
+
+.file-transfer-card.saved {
+  border-color: #b9e6c9;
+}
+
+.file-transfer-card.failed {
+  border-color: #f0c5c5;
+}
+
+.file-transfer-card.downloading {
+  border-color: #b8d7ff;
+}
+
+.file-transfer-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.file-transfer-card-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-transfer-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #eef3f8;
+  color: #526170;
+  font-size: 12px;
+}
+
+.file-transfer-card.saved .file-transfer-status {
+  background: #e8f6ee;
+  color: #14713e;
+}
+
+.file-transfer-card.failed .file-transfer-status {
+  background: #fff0f0;
+  color: var(--danger);
+}
+
+.file-transfer-card.downloading .file-transfer-status {
+  background: #eaf3ff;
+  color: #1f65d6;
+}
+
+.file-transfer-fields {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px 12px;
+  font-size: 13px;
+}
+
+.file-transfer-fields span {
+  color: var(--muted);
+}
+
+.file-transfer-fields b {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.file-transfer-empty {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .72);
+  color: var(--muted);
+  min-height: 220px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.file-transfer-empty strong {
+  color: var(--text);
 }
 
 .screen-wall-grid {
