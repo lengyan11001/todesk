@@ -20,12 +20,12 @@ use capture::CaptureState;
 use config::AgentConfig;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, ServerEvent};
+use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, RtcState, RtcStop, ServerEvent};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.8-rs";
+const AGENT_VERSION: &str = "0.2.9-rs";
 const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FAST_FRAME_MS: u64 = 900;
@@ -279,6 +279,33 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                     let status = file_transfer::receive(request).await;
                     let _ = status_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(status)));
                 });
+            }
+            ServerEvent::RtcRequest { session_id, .. } => {
+                log::warn(format!("rtc-request rejected session={} reason=native_webrtc_pending", session_id));
+                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcState(RtcState::failed(
+                    &config.device_id,
+                    &session_id,
+                    "native_webrtc_pending",
+                ))));
+                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcStop(RtcStop::new(
+                    &config.device_id,
+                    &session_id,
+                    "native_webrtc_pending",
+                ))));
+            }
+            ServerEvent::RtcOffer { session_id, .. } => {
+                log::warn(format!("rtc-offer ignored session={} reason=native_webrtc_pending", session_id));
+                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcState(RtcState::failed(
+                    &config.device_id,
+                    &session_id,
+                    "native_webrtc_pending",
+                ))));
+            }
+            ServerEvent::RtcIceCandidate { session_id, .. } => {
+                log::info(format!("rtc-ice-candidate ignored session={} reason=native_webrtc_pending", session_id));
+            }
+            ServerEvent::RtcStopped { session_id, .. } => {
+                log::info(format!("rtc-stopped received session={}", session_id));
             }
             ServerEvent::Other => {}
         }

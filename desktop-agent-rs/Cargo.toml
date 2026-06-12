@@ -1,6 +1,6 @@
 [package]
 name = "bhzn-todesk-agent-rs"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 license = "Proprietary"
 publish = false

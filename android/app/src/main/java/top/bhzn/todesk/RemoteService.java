@@ -29,6 +29,7 @@ import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.Locale;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class RemoteService extends Service {
@@ -398,7 +399,20 @@ public class RemoteService extends Service {
         JsonUtil.put(screen, "inputWidth", inputWidth);
         JsonUtil.put(screen, "inputHeight", inputHeight);
         JsonUtil.put(msg, "screen", screen);
+        JsonUtil.put(msg, "rtcCapabilities", rtcCapabilities());
         return msg;
+    }
+
+    private JSONObject rtcCapabilities() {
+        JSONObject value = JsonUtil.object();
+        JsonUtil.put(value, "webrtc", false);
+        JsonUtil.put(value, "video", false);
+        JsonUtil.put(value, "dataChannel", false);
+        JsonUtil.put(value, "localNetwork", true);
+        JsonUtil.put(value, "codecs", new JSONArray());
+        JsonUtil.put(value, "maxFps", 0);
+        JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + ";native-webrtc-pending");
+        return value;
     }
 
     private int scaleInputX(JSONObject msg, String key) {
@@ -447,6 +461,47 @@ public class RemoteService extends Service {
             sendStatus();
         } else if ("file-transfer".equals(type)) {
             handleFileTransfer(msg);
+        } else if ("rtc-request".equals(type)) {
+            String sessionId = msg.optString("sessionId");
+            Log.w(TAG, "rtc-request rejected: session=" + sessionId + ", reason=native_webrtc_pending");
+            sendRtcState(sessionId, "failed", "native_webrtc_pending");
+            sendRtcStop(sessionId, "native_webrtc_pending");
+        } else if ("rtc-offer".equals(type)) {
+            String sessionId = msg.optString("sessionId");
+            Log.w(TAG, "rtc-offer ignored: session=" + sessionId + ", reason=native_webrtc_pending");
+            sendRtcState(sessionId, "failed", "native_webrtc_pending");
+        } else if ("rtc-ice-candidate".equals(type)) {
+            Log.i(TAG, "rtc-ice-candidate ignored: session=" + msg.optString("sessionId"));
+        } else if ("rtc-stopped".equals(type)) {
+            Log.i(TAG, "rtc-stopped received: session=" + msg.optString("sessionId"));
+        }
+    }
+
+    private void sendRtcState(String sessionId, String state, String error) {
+        JSONObject msg = JsonUtil.object();
+        JsonUtil.put(msg, "type", "rtc-state");
+        JsonUtil.put(msg, "sessionId", sessionId == null ? "" : sessionId);
+        JsonUtil.put(msg, "deviceId", AppPrefs.deviceId(this));
+        JsonUtil.put(msg, "state", state);
+        JsonUtil.put(msg, "selectedCandidateType", "unknown");
+        JsonUtil.put(msg, "rttMs", 0);
+        JsonUtil.put(msg, "bitrateKbps", 0);
+        JsonUtil.put(msg, "error", error == null ? "" : error);
+        SimpleWebSocket socket = webSocket;
+        if (socket != null) {
+            socket.send(msg.toString());
+        }
+    }
+
+    private void sendRtcStop(String sessionId, String reason) {
+        JSONObject msg = JsonUtil.object();
+        JsonUtil.put(msg, "type", "rtc-stop");
+        JsonUtil.put(msg, "sessionId", sessionId == null ? "" : sessionId);
+        JsonUtil.put(msg, "deviceId", AppPrefs.deviceId(this));
+        JsonUtil.put(msg, "reason", reason == null ? "stopped" : reason);
+        SimpleWebSocket socket = webSocket;
+        if (socket != null) {
+            socket.send(msg.toString());
         }
     }
 
