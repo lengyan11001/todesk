@@ -711,8 +711,8 @@ input[type="file"] {
 
 .wall-tile-resize {
   position: absolute;
-  width: 56px;
-  height: 56px;
+  width: 44px;
+  height: 44px;
   z-index: 8;
   pointer-events: auto;
   touch-action: none;
@@ -721,16 +721,18 @@ input[type="file"] {
 .wall-tile-resize::after {
   content: "";
   position: absolute;
-  inset: 10px;
-  border: 3px solid rgba(22, 119, 255, .82);
-  opacity: .88;
-  filter: drop-shadow(0 1px 1px rgba(255, 255, 255, .75));
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(72, 103, 138, .42);
+  opacity: .72;
+  transition: border-color .16s ease, opacity .16s ease, transform .16s ease;
 }
 
 .wall-tile-resize:hover::after,
 .wall-tile-resize.resizing::after {
-  border-color: rgba(22, 119, 255, 1);
+  border-color: rgba(22, 119, 255, .92);
   opacity: 1;
+  transform: scale(1.08);
 }
 
 .wall-tile-resize-nw {
@@ -740,6 +742,8 @@ input[type="file"] {
 }
 
 .wall-tile-resize-nw::after {
+  left: 9px;
+  top: 9px;
   border-right: 0;
   border-bottom: 0;
 }
@@ -751,6 +755,8 @@ input[type="file"] {
 }
 
 .wall-tile-resize-ne::after {
+  right: 9px;
+  top: 9px;
   border-left: 0;
   border-bottom: 0;
 }
@@ -762,6 +768,8 @@ input[type="file"] {
 }
 
 .wall-tile-resize-sw::after {
+  left: 9px;
+  bottom: 9px;
   border-right: 0;
   border-top: 0;
 }
@@ -773,6 +781,8 @@ input[type="file"] {
 }
 
 .wall-tile-resize-se::after {
+  right: 9px;
+  bottom: 9px;
   border-left: 0;
   border-top: 0;
 }
@@ -823,16 +833,18 @@ input[type="file"] {
 .wall-resize-handle::after {
   content: "";
   position: absolute;
-  inset: 10px;
-  border: 3px solid rgba(22, 119, 255, .78);
-  opacity: .86;
-  filter: drop-shadow(0 1px 1px rgba(255, 255, 255, .75));
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(72, 103, 138, .42);
+  opacity: .72;
+  transition: border-color .16s ease, opacity .16s ease, transform .16s ease;
 }
 
 .wall-resize-handle:hover::after,
 .wall-resize-handle.resizing::after {
-  border-color: rgba(22, 119, 255, 1);
+  border-color: rgba(22, 119, 255, .92);
   opacity: 1;
+  transform: scale(1.08);
 }
 
 .wall-resize-nw {
@@ -842,6 +854,8 @@ input[type="file"] {
 }
 
 .wall-resize-nw::after {
+  left: 9px;
+  top: 9px;
   border-right: 0;
   border-bottom: 0;
 }
@@ -853,6 +867,8 @@ input[type="file"] {
 }
 
 .wall-resize-ne::after {
+  right: 9px;
+  top: 9px;
   border-left: 0;
   border-bottom: 0;
 }
@@ -864,6 +880,8 @@ input[type="file"] {
 }
 
 .wall-resize-sw::after {
+  left: 9px;
+  bottom: 9px;
   border-right: 0;
   border-top: 0;
 }
@@ -875,6 +893,8 @@ input[type="file"] {
 }
 
 .wall-resize-se::after {
+  right: 9px;
+  bottom: 9px;
   border-left: 0;
   border-top: 0;
 }
