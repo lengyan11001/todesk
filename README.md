@@ -13,7 +13,7 @@
 
 ## 当前包
 
-- Android APK: `E:\BHZN-ToDesk\android\manual-build\out\bhzn-todesk-debug-v0.1.8-9.apk`
+- Android APK: `E:\BHZN-ToDesk\android\manual-build\out\bhzn-todesk-debug-v0.1.9-10.apk`
 - H5 Android 下载副本: `E:\BHZN-ToDesk\server\public\downloads\bhzn-todesk-debug.apk`
 - Windows Agent: `E:\BHZN-ToDesk\desktop-agent-rs\dist\BHZN-ToDesk-Agent.exe`
 - Windows 安装包: `E:\BHZN-ToDesk\desktop-agent-rs\dist\BHZN-ToDesk-Agent-Setup.exe`
@@ -24,7 +24,7 @@
 
 ```powershell
 cd E:\BHZN-ToDesk\android
-powershell -ExecutionPolicy Bypass -File .\build-apk.ps1 -Channel debug -VersionCode 9 -VersionName 0.1.8
+powershell -ExecutionPolicy Bypass -File .\build-apk.ps1 -Channel debug -VersionCode 10 -VersionName 0.1.9
 ```
 
 release 覆盖升级必须一直使用同一个 keystore，见 `android/RELEASE_SIGNING.md`。

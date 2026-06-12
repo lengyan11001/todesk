@@ -429,7 +429,10 @@ public class RemoteService extends Service {
                     scaleInputY(msg, "y"),
                     scaleInputX(msg, "x2"),
                     scaleInputY(msg, "y2"),
-                    msg.optLong("duration", 80)
+                    msg.optLong("duration", 80),
+                    msg.optString("key"),
+                    msg.optString("code"),
+                    msg.optString("text")
             );
             sendInputResult(msg, ok);
             if (!ok) {

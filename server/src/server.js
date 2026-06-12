@@ -1293,6 +1293,7 @@ wss.on("connection", (ws) => {
           deltaX: Number(msg.deltaX || 0),
           deltaY: Number(msg.deltaY || 0),
           key: String(msg.key || ""),
+          code: String(msg.code || ""),
           text: String(msg.text || ""),
           modifiers: Array.isArray(msg.modifiers) ? msg.modifiers.slice(0, 8).map(String) : []
         });
