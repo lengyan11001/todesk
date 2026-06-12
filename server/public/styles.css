@@ -742,18 +742,26 @@ input[type="file"] {
 
 .wall-resize-handle {
   position: absolute;
-  width: 24px;
-  height: 24px;
-  z-index: 4;
+  width: 44px;
+  height: 44px;
+  z-index: 12;
   pointer-events: auto;
+  touch-action: none;
 }
 
 .wall-resize-handle::after {
   content: "";
   position: absolute;
-  inset: 7px;
-  border: 2px solid rgba(22, 119, 255, .72);
-  opacity: .7;
+  inset: 10px;
+  border: 3px solid rgba(22, 119, 255, .78);
+  opacity: .86;
+  filter: drop-shadow(0 1px 1px rgba(255, 255, 255, .75));
+}
+
+.wall-resize-handle:hover::after,
+.wall-resize-handle.resizing::after {
+  border-color: rgba(22, 119, 255, 1);
+  opacity: 1;
 }
 
 .wall-resize-nw {
@@ -802,6 +810,11 @@ input[type="file"] {
 
 .wall-control-window:fullscreen .wall-resize-handle {
   display: none;
+}
+
+body.wall-resizing {
+  cursor: inherit;
+  user-select: none;
 }
 
 .wall-control-titlebar {

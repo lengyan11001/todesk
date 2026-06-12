@@ -741,10 +741,12 @@ function beginWallResize(event) {
   if (!handle) return;
   event.preventDefault();
   event.stopPropagation();
+  normalizeWallControlBounds();
   const rect = wallControlWindow.getBoundingClientRect();
   wallResizeState = {
     handle,
     pointerId: event.pointerId,
+    target: event.currentTarget,
     startX: event.clientX,
     startY: event.clientY,
     left: rect.left,
@@ -752,11 +754,15 @@ function beginWallResize(event) {
     width: rect.width,
     height: rect.height
   };
-  event.currentTarget.setPointerCapture(event.pointerId);
+  event.currentTarget.classList.add("resizing");
+  document.body.classList.add("wall-resizing");
+  document.body.style.cursor = getComputedStyle(event.currentTarget).cursor;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
 }
 
 function moveWallResize(event) {
-  if (!wallResizeState || event.pointerId !== wallResizeState.pointerId) return;
+  if (!wallResizeState) return;
+  if (event.pointerId !== undefined && event.pointerId !== wallResizeState.pointerId) return;
   event.preventDefault();
   const dx = event.clientX - wallResizeState.startX;
   const dy = event.clientY - wallResizeState.startY;
@@ -795,7 +801,11 @@ function moveWallResize(event) {
 }
 
 function endWallResize(event) {
-  if (!wallResizeState || event.pointerId !== wallResizeState.pointerId) return;
+  if (!wallResizeState) return;
+  if (event.pointerId !== undefined && event.pointerId !== wallResizeState.pointerId) return;
+  wallResizeState.target?.classList.remove("resizing");
+  document.body.classList.remove("wall-resizing");
+  document.body.style.cursor = "";
   wallResizeState = null;
 }
 
@@ -1710,6 +1720,10 @@ for (const handle of wallResizeHandles) {
   handle.addEventListener("pointerup", endWallResize);
   handle.addEventListener("pointercancel", endWallResize);
 }
+
+window.addEventListener("pointermove", moveWallResize);
+window.addEventListener("pointerup", endWallResize);
+window.addEventListener("pointercancel", endWallResize);
 
 window.addEventListener("resize", () => {
   if (isWallControlOpen()) normalizeWallControlBounds();
