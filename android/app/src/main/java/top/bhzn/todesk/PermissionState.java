@@ -19,12 +19,20 @@ final class PermissionState {
         if (manager == null) return false;
         List<AccessibilityServiceInfo> services = manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK);
         String serviceName = context.getPackageName() + "/" + RemoteInputService.class.getName();
+        String shortServiceName = context.getPackageName() + "/." + RemoteInputService.class.getSimpleName();
         for (AccessibilityServiceInfo service : services) {
-            if (service.getId() != null && service.getId().equals(serviceName)) {
+            String id = service.getId();
+            if (id != null && (id.equals(serviceName) || id.equals(shortServiceName))) {
                 return true;
             }
         }
-        return RemoteInputService.isReady();
+        return false;
+    }
+
+    static boolean isInputControlReady(Context context) {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                && isAccessibilityEnabled(context)
+                && RemoteInputService.isReady();
     }
 
     static boolean canDrawOverlays(Context context) {
@@ -38,6 +46,7 @@ final class PermissionState {
     static JSONObject toJson(Context context, boolean mediaReady) {
         JSONObject permissions = JsonUtil.object();
         JsonUtil.put(permissions, "accessibility", isAccessibilityEnabled(context));
+        JsonUtil.put(permissions, "inputControl", isInputControlReady(context));
         JsonUtil.put(permissions, "overlay", canDrawOverlays(context));
         JsonUtil.put(permissions, "notification", canPostNotifications(context));
         JsonUtil.put(permissions, "mediaProjection", mediaReady);

@@ -2,6 +2,7 @@ package top.bhzn.todesk;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.Intent;
 import android.graphics.Path;
 import android.os.Build;
 import android.util.Log;
@@ -21,6 +22,7 @@ public class RemoteInputService extends AccessibilityService {
     static boolean dispatchRemoteInput(String action, int x, int y, int x2, int y2, long duration) {
         RemoteInputService service = instance;
         if (service == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.w(TAG, "input service is not ready");
             return false;
         }
         return service.handleInput(action, x, y, x2, y2, duration);
@@ -31,6 +33,7 @@ public class RemoteInputService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         Log.i(TAG, "accessibility connected");
+        notifyRemoteService();
     }
 
     @Override
@@ -45,8 +48,15 @@ public class RemoteInputService extends AccessibilityService {
     public void onDestroy() {
         if (instance == this) {
             instance = null;
+            notifyRemoteService();
         }
         super.onDestroy();
+    }
+
+    private void notifyRemoteService() {
+        if (RemoteService.isRunning()) {
+            startService(new Intent(this, RemoteService.class).setAction(RemoteService.ACTION_STATUS));
+        }
     }
 
     private boolean handleInput(String action, int x, int y, int x2, int y2, long duration) {

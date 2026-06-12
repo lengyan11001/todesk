@@ -135,7 +135,12 @@ function hasScreenPermission(device) {
 }
 
 function hasInputPermission(device) {
-  return Boolean(device?.permissions?.accessibility || device?.permissions?.inputControl);
+  const permissions = device?.permissions || {};
+  if (Object.prototype.hasOwnProperty.call(permissions, "inputControl")) {
+    return Boolean(permissions.inputControl);
+  }
+  if (devicePlatform(device) === "android") return false;
+  return Boolean(permissions.accessibility);
 }
 
 function platformText(device) {
@@ -421,7 +426,7 @@ function renderDevices() {
       <div class="badges">
         <i class="badge agent-badge">${escapeHtml(device.agentVersion ? `Agent ${device.agentVersion}` : "Agent -")}</i>
         <i class="badge ${hasScreenPermission(device) ? "" : "warn"}">屏幕${hasScreenPermission(device) ? "已开" : "未开"}</i>
-        <i class="badge ${hasInputPermission(device) ? "" : "warn"}">控制${hasInputPermission(device) ? "已开" : "未开"}</i>
+        <i class="badge ${canControlDevice(device) ? "" : "warn"}">控制${canControlDevice(device) ? "可用" : "未就绪"}</i>
       </div>
       <label class="monitor-toggle">
         <input type="checkbox" ${device.monitorAlways ? "checked" : ""}>
@@ -976,7 +981,7 @@ function setStageTab(tab) {
 function errorText(msg) {
   const device = msg.device || {};
   if (msg.error === "screen_not_ready") return `设备已在线，但 ${platformText(device)} 端还没有开启屏幕权限`;
-  if (msg.error === "input_not_ready") return `当前仅可观看：${platformText(device)} 端未开启控制权限或允许控制开关`;
+  if (msg.error === "input_not_ready") return `当前仅可观看：${platformText(device)} 端输入控制未就绪，请确认客户端录屏、输入服务和允许网页控制均已就绪`;
   if (msg.error === "device_offline") return "设备不在线";
   if (msg.error === "device_not_bound") return "设备还没有绑定到当前账号";
   if (msg.error === "bad_verification_code") return "设备验证码不正确";

@@ -342,7 +342,12 @@ function hasScreenPermission(device) {
 }
 
 function hasInputPermission(device) {
-  return Boolean(device?.permissions?.accessibility || device?.permissions?.inputControl);
+  const permissions = device?.permissions || {};
+  if (Object.prototype.hasOwnProperty.call(permissions, "inputControl")) {
+    return Boolean(permissions.inputControl);
+  }
+  if ((device?.platform || "android") === "android") return false;
+  return Boolean(permissions.accessibility);
 }
 
 function bearerToken(req) {

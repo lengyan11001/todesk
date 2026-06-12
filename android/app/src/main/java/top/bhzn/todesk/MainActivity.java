@@ -159,7 +159,8 @@ public class MainActivity extends Activity {
         if (content == null) return;
         boolean running = RemoteService.isRunning();
         boolean media = RemoteService.isMediaReady();
-        boolean input = PermissionState.isAccessibilityEnabled(this);
+        boolean accessibility = PermissionState.isAccessibilityEnabled(this);
+        boolean input = PermissionState.isInputControlReady(this);
         boolean server = RemoteService.isServerConnected();
         statusLine.setText(running ? (server ? "服务运行中 · 已连接服务器" : "服务运行中 · 正在连接服务器") : "服务未启动");
         homeTab.setEnabled(activeTab != 0);
@@ -167,15 +168,15 @@ public class MainActivity extends Activity {
         fileTab.setEnabled(activeTab != 2);
         content.removeAllViews();
         if (activeTab == 0) {
-            renderHome(media, input, running, server);
+            renderHome(media, accessibility, input, running, server);
         } else if (activeTab == 1) {
-            renderPermissions(media, input, running);
+            renderPermissions(media, accessibility, input, running);
         } else {
             renderFiles();
         }
     }
 
-    private void renderHome(boolean media, boolean input, boolean running, boolean server) {
+    private void renderHome(boolean media, boolean accessibility, boolean input, boolean running, boolean server) {
         copyCard("本机设备 ID", AppPrefs.deviceId(this), "复制设备 ID");
         copyCard("设备验证码", AppPrefs.deviceCode(this), "复制验证码");
 
@@ -226,7 +227,11 @@ public class MainActivity extends Activity {
         });
         content.addView(controlSwitch, blockParams());
 
-        String state = "录屏：" + yesNo(media) + "    输入：" + yesNo(input) + "    服务：" + yesNo(running) + "    服务器：" + yesNo(server);
+        String state = "录屏：" + yesNo(media)
+                + "    无障碍：" + yesNo(accessibility)
+                + "    输入服务：" + yesNo(input)
+                + "    服务：" + yesNo(running)
+                + "    服务器：" + yesNo(server);
         card("当前状态", state, 16, false);
 
         Button start = primaryButton(running ? "重新申请录屏并启动" : "申请录屏并启动服务");
@@ -250,7 +255,7 @@ public class MainActivity extends Activity {
         content.addView(stop, blockParams());
     }
 
-    private void renderPermissions(boolean media, boolean input, boolean running) {
+    private void renderPermissions(boolean media, boolean accessibility, boolean input, boolean running) {
         permissionRow(
                 "录屏权限",
                 media ? "已授权，屏幕画面可传到网页端" : "未授权，点击后系统会弹出屏幕录制确认",
@@ -264,7 +269,9 @@ public class MainActivity extends Activity {
         );
         permissionRow(
                 "无障碍输入",
-                input ? "已开启，可执行点击、滑动、返回、主页" : "未开启，需要在系统设置中开启 BHZN ToDesk 输入控制",
+                input ? "输入服务已就绪，可执行点击、滑动、返回、主页"
+                        : (accessibility ? "系统权限已开启，输入服务未连接；请返回本应用或关闭后重新开启该无障碍服务"
+                        : "未开启，需要在系统设置中开启 BHZN ToDesk 输入控制"),
                 "打开设置",
                 new View.OnClickListener() {
                     @Override
@@ -311,7 +318,7 @@ public class MainActivity extends Activity {
         );
         String ready = media && input && AppPrefs.controlEnabled(this)
                 ? "设备已准备好，在 H5 输入设备 ID 即可发起控制。"
-                : "请先补齐录屏和无障碍输入权限。";
+                : "请先补齐录屏、无障碍输入服务和允许网页控制开关。";
         card("接管准备状态", ready, 16, false);
     }
 

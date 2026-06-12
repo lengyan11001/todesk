@@ -391,7 +391,7 @@ public class RemoteService extends Service {
         JsonUtil.put(msg, "agentVersion", BuildConfig.VERSION_NAME);
         JsonUtil.put(msg, "androidVersion", Build.VERSION.RELEASE);
         JsonUtil.put(msg, "permissions", PermissionState.toJson(this, mediaReady));
-        JsonUtil.put(msg, "controlEnabled", AppPrefs.controlEnabled(this) && mediaReady && PermissionState.isAccessibilityEnabled(this));
+        JsonUtil.put(msg, "controlEnabled", AppPrefs.controlEnabled(this) && mediaReady && PermissionState.isInputControlReady(this));
         JSONObject screen = JsonUtil.object();
         JsonUtil.put(screen, "width", screenWidth);
         JsonUtil.put(screen, "height", screenHeight);
@@ -432,6 +432,9 @@ public class RemoteService extends Service {
                     msg.optLong("duration", 80)
             );
             if (!ok) {
+                Log.w(TAG, "remote input failed: action=" + action
+                        + ", accessibility=" + PermissionState.isAccessibilityEnabled(this)
+                        + ", inputReady=" + PermissionState.isInputControlReady(this));
                 sendStatus();
             }
         } else if ("control-request".equals(type)) {
