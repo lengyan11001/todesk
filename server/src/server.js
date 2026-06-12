@@ -69,6 +69,7 @@ const devices = new Map();
 const clients = new Set();
 const controllers = new Map();
 const fileTransfers = new Map();
+const trafficStats = new Map();
 let state = loadState();
 
 function now() {
@@ -90,19 +91,81 @@ function send(ws, payload) {
 }
 
 function sendRealtimeFrame(ws, payload) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  if (ws.bufferedAmount > FRAME_BUFFER_LIMIT) return;
+  if (ws.readyState !== WebSocket.OPEN) return false;
+  if (ws.bufferedAmount > FRAME_BUFFER_LIMIT) return false;
   ws.send(safeJson(payload));
+  return true;
 }
 
 function sendRealtimeBinaryFrame(ws, payload) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  if (ws.bufferedAmount > FRAME_BUFFER_LIMIT) return;
+  if (ws.readyState !== WebSocket.OPEN) return false;
+  if (ws.bufferedAmount > FRAME_BUFFER_LIMIT) return false;
   ws.send(payload, { binary: true });
+  return true;
 }
 
 function relayLog(event, details = {}) {
   console.log(JSON.stringify({ time: iso(), event, ...details }));
+}
+
+function trafficStatsFor(deviceId) {
+  const id = normalizeDeviceId(deviceId);
+  let stats = trafficStats.get(id);
+  if (!stats) {
+    stats = {
+      deviceId: id,
+      createdAt: iso(),
+      updatedAt: iso(),
+      framesFromDevice: 0,
+      framesToControllers: 0,
+      bytesFromDevice: 0,
+      bytesToControllers: 0,
+      lastFrameBytesFromDevice: 0,
+      lastFrameBytesToControllers: 0,
+      lastControllerCount: 0
+    };
+    trafficStats.set(id, stats);
+  }
+  return stats;
+}
+
+function addFrameTraffic(deviceId, fromDeviceBytes, toControllersBytes, controllerCount) {
+  const stats = trafficStatsFor(deviceId);
+  stats.framesFromDevice += 1;
+  stats.framesToControllers += controllerCount;
+  stats.bytesFromDevice += fromDeviceBytes;
+  stats.bytesToControllers += toControllersBytes;
+  stats.lastFrameBytesFromDevice = fromDeviceBytes;
+  stats.lastFrameBytesToControllers = toControllersBytes;
+  stats.lastControllerCount = controllerCount;
+  stats.updatedAt = iso();
+}
+
+function resetTrafficStats(deviceId) {
+  const id = normalizeDeviceId(deviceId);
+  const stats = {
+    deviceId: id,
+    createdAt: iso(),
+    updatedAt: iso(),
+    framesFromDevice: 0,
+    framesToControllers: 0,
+    bytesFromDevice: 0,
+    bytesToControllers: 0,
+    lastFrameBytesFromDevice: 0,
+    lastFrameBytesToControllers: 0,
+    lastControllerCount: 0
+  };
+  trafficStats.set(id, stats);
+  return stats;
+}
+
+function trafficStatsView(stats) {
+  const device = devices.get(stats.deviceId);
+  return {
+    ...stats,
+    online: Boolean(device),
+    controllerCount: device ? device.controllers.size : 0
+  };
 }
 
 function messageBuffer(raw) {
@@ -131,7 +194,7 @@ function decodeBinaryFrame(raw) {
     throw new Error("truncated binary frame");
   }
   const header = JSON.parse(buffer.subarray(headerStart, dataStart).toString("utf8"));
-  return { header, image: buffer.subarray(dataStart) };
+  return { header, image: buffer.subarray(dataStart), byteLength: buffer.length };
 }
 
 function encodeBinaryFrame(header, image) {
@@ -675,10 +738,12 @@ function handleBinaryDeviceFrame(ws, raw) {
     inputHeight,
     timestamp: header.timestamp || now()
   }, frame.image);
+  let delivered = 0;
   for (const sessionId of device.controllers) {
     const controller = controllers.get(sessionId);
-    if (controller) sendRealtimeBinaryFrame(controller.ws, forwarded);
+    if (controller && sendRealtimeBinaryFrame(controller.ws, forwarded)) delivered += 1;
   }
+  addFrameTraffic(ws.deviceId, frame.byteLength || messageBuffer(raw).length, forwarded.length * delivered, delivered);
 }
 
 app.get("/api/health", (req, res) => {
@@ -1042,6 +1107,19 @@ app.get("/api/admin/bindings", requireAdmin, (req, res) => {
   });
 });
 
+app.get("/api/admin/traffic", requireAdmin, (req, res) => {
+  const deviceId = normalizeDeviceId(req.query.deviceId);
+  const stats = deviceId
+    ? [trafficStatsView(trafficStatsFor(deviceId))]
+    : Array.from(trafficStats.values()).map(trafficStatsView);
+  res.json({ stats });
+});
+
+app.post("/api/admin/traffic/:deviceId/reset", requireAdmin, (req, res) => {
+  const stats = resetTrafficStats(req.params.deviceId);
+  res.json({ ok: true, stats: trafficStatsView(stats) });
+});
+
 wss.on("connection", (ws) => {
   ws.role = "unknown";
   ws.userId = null;
@@ -1168,6 +1246,7 @@ wss.on("connection", (ws) => {
           });
           return;
         }
+        const fromDeviceBytes = Buffer.byteLength(JSON.stringify(msg));
         const payload = {
           type: "frame",
           deviceId: ws.deviceId,
@@ -1178,10 +1257,13 @@ wss.on("connection", (ws) => {
           height: msg.height,
           timestamp: msg.timestamp || now()
         };
+        const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
+        let delivered = 0;
         for (const sessionId of device.controllers) {
           const controller = controllers.get(sessionId);
-          if (controller) sendRealtimeFrame(controller.ws, payload);
+          if (controller && sendRealtimeFrame(controller.ws, payload)) delivered += 1;
         }
+        addFrameTraffic(ws.deviceId, fromDeviceBytes, payloadBytes * delivered, delivered);
         return;
       }
 
