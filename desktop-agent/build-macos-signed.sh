@@ -4,7 +4,7 @@ set -euo pipefail
 APP_NAME="${APP_NAME:-BHZN ToDesk Agent}"
 BUNDLE_ID="${BUNDLE_ID:-top.bhzn.todesk.agent}"
 PKG_ID="${PKG_ID:-top.bhzn.todesk.agent.pkg}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.20}"
 SERVER_URL="${SERVER_URL:-https://todesk.bhzn.top}"
 APP_CERT="${DEVELOPER_ID_APPLICATION:-}"
 INSTALLER_CERT="${DEVELOPER_ID_INSTALLER:-}"
@@ -50,6 +50,9 @@ python3 -m venv "${ROOT_DIR}/.venv"
 "${ROOT_DIR}/.venv/bin/pyinstaller" \
   --clean \
   --windowed \
+  --collect-all aiortc \
+  --collect-all aioice \
+  --collect-all av \
   --name "${APP_NAME}" \
   --osx-bundle-identifier "${BUNDLE_ID}" \
   "${ROOT_DIR}/bhzn_desktop_agent.py"

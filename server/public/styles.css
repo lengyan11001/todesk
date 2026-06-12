@@ -1258,8 +1258,15 @@ canvas {
   background: #111820;
 }
 
-.viewer.rtc-active canvas {
-  display: none;
+.viewer.rtc-active .rtc-video,
+.viewer.rtc-active #screenCanvas {
+  position: absolute;
+  inset: 0;
+}
+
+.viewer.rtc-active #screenCanvas {
+  opacity: 0;
+  z-index: 2;
 }
 
 .remote-cursor {

@@ -7,7 +7,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.1.19"
+VERSION="0.1.20"
 MACOS_ARCH="${MACOS_ARCH:-$(uname -m)}"
 BUILD_VENV="${ROOT_DIR}/.build-venv-macos-${MACOS_ARCH}"
 BUILD_DIR="${ROOT_DIR}/build-macos-app"
@@ -52,7 +52,7 @@ fi
 "${VENV_PYTHON_CMD[@]}" -m pip install --upgrade pip
 "${VENV_PYTHON_CMD[@]}" -m pip install --only-binary=:all: \
   Pillow==10.4.0 \
-  cryptography==42.0.8 \
+  cryptography==48.0.1 \
   cffi \
   pyobjc-core \
   pyobjc-framework-Cocoa \
@@ -62,13 +62,20 @@ fi
   mss==9.0.1 \
   pyautogui==0.9.54 \
   pyperclip==1.11.0 \
-  websocket-client==1.8.0
+  websocket-client==1.8.0 \
+  numpy==2.0.2 \
+  av==12.3.0 \
+  aiortc==1.9.0
 
 "${VENV_PYTHON_CMD[@]}" -m PyInstaller \
   --noconfirm \
   --clean \
   --console \
   --target-architecture "${MACOS_ARCH}" \
+  --specpath "${BUILD_DIR}" \
+  --collect-all aiortc \
+  --collect-all aioice \
+  --collect-all av \
   --exclude-module tkinter \
   --exclude-module _tkinter \
   --exclude-module tcl \

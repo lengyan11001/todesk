@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import base64
 import ctypes
 import hashlib
@@ -15,6 +16,7 @@ import threading
 import time
 import urllib.request
 import struct
+from fractions import Fraction
 from urllib.parse import urlparse
 try:
     import tkinter as tk
@@ -34,10 +36,26 @@ try:
     import Quartz
 except Exception:
     Quartz = None
+try:
+    import numpy as np
+    from aiortc import RTCConfiguration, RTCIceCandidate, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc.sdp import candidate_from_sdp
+    from av import VideoFrame
+    AIORTC_AVAILABLE = True
+except Exception:
+    RTCConfiguration = None
+    RTCIceCandidate = None
+    RTCIceServer = None
+    RTCPeerConnection = None
+    RTCSessionDescription = None
+    VideoStreamTrack = object
+    VideoFrame = None
+    candidate_from_sdp = None
+    AIORTC_AVAILABLE = False
 
 
 APP_NAME = "BHZN ToDesk Desktop Agent"
-AGENT_VERSION = "0.1.19"
+AGENT_VERSION = "0.1.20"
 FRAME_INTERVAL = 0.10
 DRAG_FRAME_INTERVAL = 0.05
 HEARTBEAT_INTERVAL = 15.0
@@ -52,6 +70,11 @@ MAX_FILE_TRANSFER_BYTES = 100 * 1024 * 1024
 MAX_IN_FLIGHT_FRAMES = 2
 FRAME_BACKPRESSURE_GRACE = 1.25
 FRAME_BACKPRESSURE_PAUSE = 0.75
+try:
+    RTC_TARGET_FPS = max(1, min(30, int(os.environ.get("BHZN_RTC_FPS", "12"))))
+except Exception:
+    RTC_TARGET_FPS = 12
+RTC_FRAME_TIME_BASE = Fraction(1, 90000)
 APPLICATION_SERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
 BINARY_FRAME_MAGIC = b"BHZF1"
 BINARY_FRAME_HEADER_LIMIT = 64 * 1024
@@ -269,6 +292,32 @@ def is_allowed_file_url(url: str) -> bool:
     return False
 
 
+class DesktopVideoTrack(VideoStreamTrack):
+    def __init__(self, agent):
+        super().__init__()
+        self.agent = agent
+        self.frame_index = 0
+        self.frame_interval = 1.0 / RTC_TARGET_FPS
+        self.frame_duration = max(1, int(90000 / RTC_TARGET_FPS))
+        self.next_frame_at = time.monotonic()
+
+    async def recv(self):
+        now = time.monotonic()
+        if self.next_frame_at > now:
+            await asyncio.sleep(self.next_frame_at - now)
+        elif now - self.next_frame_at > self.frame_interval * 2:
+            self.next_frame_at = now
+        self.next_frame_at += self.frame_interval
+
+        image = self.agent.capture_image_for_rtc()
+        array = np.asarray(image.convert("RGB"))
+        frame = VideoFrame.from_ndarray(array, format="rgb24")
+        frame.pts = self.frame_index * self.frame_duration
+        frame.time_base = RTC_FRAME_TIME_BASE
+        self.frame_index += 1
+        return frame
+
+
 class DesktopAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -291,15 +340,36 @@ class DesktopAgent:
         self.last_frame_ack_at = 0.0
         self.bridge_input_thread = None
         self.heartbeat_thread = None
+        self.rtc_loop = None
+        self.rtc_thread = None
+        self.rtc_sessions = {}
+        self.rtc_lock = threading.Lock()
         self.dragging = False
         self.drag_button = "left"
         self.fast_frame_until = 0.0
         self.pointer_pos = None
         self.input_thread = threading.Thread(target=self.input_loop, daemon=True)
         self.input_thread.start()
+        self.start_rtc_loop()
         if self.macos_capture_bridge_enabled():
             self.bridge_input_thread = threading.Thread(target=self.bridge_input_loop, daemon=True)
             self.bridge_input_thread.start()
+
+    def start_rtc_loop(self):
+        if not AIORTC_AVAILABLE:
+            return
+        self.rtc_loop = asyncio.new_event_loop()
+        self.rtc_thread = threading.Thread(target=self.run_rtc_loop, daemon=True)
+        self.rtc_thread.start()
+
+    def run_rtc_loop(self):
+        asyncio.set_event_loop(self.rtc_loop)
+        self.rtc_loop.run_forever()
+
+    def run_rtc_coro(self, coro):
+        if not self.rtc_loop:
+            return None
+        return asyncio.run_coroutine_threadsafe(coro, self.rtc_loop)
 
     def run(self):
         delay = RECONNECT_MIN
@@ -351,6 +421,7 @@ class DesktopAgent:
 
     def on_close(self, _ws, status_code, message):
         self.connected = False
+        self.close_all_rtc_sessions()
         print(f"[agent] closed {status_code or ''} {message or ''}", flush=True)
 
     def on_error(self, _ws, error):
@@ -400,6 +471,7 @@ class DesktopAgent:
         self.connected = False
         self.capture_requested = False
         self.control_sessions.clear()
+        self.close_all_rtc_sessions()
         self.reset_frame_backpressure()
         self.stop_macos_capture_bridge()
         self.release_drag()
@@ -463,43 +535,235 @@ class DesktopAgent:
         self.send_json(self.base_status(msg_type))
 
     def rtc_capabilities(self) -> dict:
+        available = bool(AIORTC_AVAILABLE)
         return {
-            "webrtc": False,
-            "video": False,
-            "dataChannel": False,
+            "webrtc": available,
+            "video": available,
+            "dataChannel": available,
             "localNetwork": True,
-            "codecs": [],
-            "version": "planned-native",
+            "codecs": ["H264", "VP8"] if available else [],
+            "maxFps": RTC_TARGET_FPS if available else 0,
+            "version": "aiortc-1",
         }
 
     def handle_rtc_request(self, msg: dict):
         session_id = str(msg.get("sessionId") or "")
-        print(f"[agent] rtc requested session={session_id} but native WebRTC is not implemented", flush=True)
-        self.send_json(
-            {
-                "type": "rtc-state",
-                "sessionId": session_id,
-                "deviceId": self.config.device_id,
-                "state": "failed",
-                "selectedCandidateType": "unknown",
-                "error": "not_implemented",
-            }
-        )
+        if not AIORTC_AVAILABLE or not self.rtc_loop:
+            self.send_rtc_state(session_id, "failed", error="aiortc_unavailable")
+            return
+        if not self.screen_permission_available():
+            self.send_rtc_state(session_id, "failed", error="screen_not_ready")
+            self.send_status("status")
+            return
+        print(f"[agent] rtc requested session={session_id}", flush=True)
+        future = self.run_rtc_coro(self.start_rtc_session(msg))
+        if future:
+            future.add_done_callback(lambda item: self.log_rtc_future("start", session_id, item))
 
     def handle_rtc_signal(self, msg: dict):
         session_id = str(msg.get("sessionId") or "")
         if msg.get("type") == "rtc-stopped":
+            self.close_rtc_session(session_id)
             return
+        if not AIORTC_AVAILABLE or not self.rtc_loop:
+            self.send_rtc_state(session_id, "failed", error="aiortc_unavailable")
+            return
+        future = self.run_rtc_coro(self.handle_rtc_signal_async(msg))
+        if future:
+            future.add_done_callback(lambda item: self.log_rtc_future("signal", session_id, item))
+
+    def log_rtc_future(self, action: str, session_id: str, future):
+        try:
+            future.result()
+        except Exception as exc:
+            print(f"[agent] rtc {action} failed session={session_id}: {exc}", flush=True)
+            self.send_rtc_state(session_id, "failed", error=str(exc))
+
+    def send_rtc_state(self, session_id: str, state: str, candidate_type: str = "unknown", error: str = ""):
         self.send_json(
             {
                 "type": "rtc-state",
                 "sessionId": session_id,
                 "deviceId": self.config.device_id,
-                "state": "failed",
-                "selectedCandidateType": "unknown",
-                "error": "not_implemented",
+                "state": state,
+                "selectedCandidateType": candidate_type,
+                "error": str(error or "")[:400],
             }
         )
+
+    async def start_rtc_session(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "")
+        if not session_id:
+            return
+        await self.close_rtc_session_async(session_id)
+        ice_servers = []
+        for item in msg.get("iceServers") or []:
+            urls = item.get("urls") or []
+            if isinstance(urls, str):
+                urls = [urls]
+            if not urls:
+                continue
+            ice_servers.append(
+                RTCIceServer(
+                    urls=urls,
+                    username=item.get("username"),
+                    credential=item.get("credential"),
+                )
+            )
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
+        track = DesktopVideoTrack(self)
+        pc.addTrack(track)
+
+        @pc.on("icecandidate")
+        async def on_icecandidate(candidate):
+            if candidate is None:
+                return
+            self.send_json(
+                {
+                    "type": "rtc-ice-candidate",
+                    "sessionId": session_id,
+                    "deviceId": self.config.device_id,
+                    "candidate": {
+                        "candidate": candidate.to_sdp(),
+                        "sdpMid": candidate.sdpMid,
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                    },
+                }
+            )
+
+        @pc.on("connectionstatechange")
+        async def on_connectionstatechange():
+            state = pc.connectionState
+            self.send_rtc_state(session_id, state, candidate_type=await self.selected_candidate_type(pc))
+            if state in {"failed", "closed"}:
+                await self.close_rtc_session_async(session_id)
+
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            if channel.label == "control":
+                @channel.on("message")
+                def on_control_message(message):
+                    self.handle_rtc_control_message(session_id, channel, message)
+
+        with self.rtc_lock:
+            self.rtc_sessions[session_id] = {"pc": pc, "track": track}
+        self.send_rtc_state(session_id, "checking")
+
+    async def handle_rtc_signal_async(self, msg: dict):
+        session_id = str(msg.get("sessionId") or "")
+        with self.rtc_lock:
+            session = self.rtc_sessions.get(session_id)
+        if not session:
+            self.send_rtc_state(session_id, "failed", error="bad_rtc_session")
+            return
+        pc = session["pc"]
+        msg_type = msg.get("type")
+        if msg_type == "rtc-offer":
+            sdp = str(msg.get("sdp") or "")
+            if not sdp:
+                self.send_rtc_state(session_id, "failed", error="empty_offer")
+                return
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            self.send_json(
+                {
+                    "type": "rtc-answer",
+                    "sessionId": session_id,
+                    "deviceId": self.config.device_id,
+                    "sdp": pc.localDescription.sdp,
+                }
+            )
+            return
+        if msg_type == "rtc-ice-candidate":
+            candidate = self.parse_remote_ice_candidate(msg.get("candidate") or {})
+            if candidate is not None:
+                await pc.addIceCandidate(candidate)
+            return
+
+    def parse_remote_ice_candidate(self, payload: dict):
+        raw = str(payload.get("candidate") or "")
+        if not raw or candidate_from_sdp is None:
+            return None
+        if raw.startswith("candidate:"):
+            raw = raw[len("candidate:") :]
+        candidate = candidate_from_sdp(raw)
+        candidate.sdpMid = payload.get("sdpMid")
+        candidate.sdpMLineIndex = payload.get("sdpMLineIndex")
+        return candidate
+
+    def handle_rtc_control_message(self, session_id: str, channel, message):
+        try:
+            payload = json.loads(message if isinstance(message, str) else message.decode("utf-8"))
+        except Exception:
+            return
+        if payload.get("type") != "input":
+            return
+        payload["sessionId"] = session_id
+        try:
+            self.handle_input(payload)
+            self.control_enabled = True
+            result = {
+                "type": "input-result",
+                "sessionId": session_id,
+                "inputId": str(payload.get("inputId") or ""),
+                "action": str(payload.get("action") or ""),
+                "ok": True,
+                "error": "",
+            }
+        except Exception as exc:
+            self.control_enabled = False
+            result = {
+                "type": "input-result",
+                "sessionId": session_id,
+                "inputId": str(payload.get("inputId") or ""),
+                "action": str(payload.get("action") or ""),
+                "ok": False,
+                "error": str(exc)[:400],
+            }
+        try:
+            channel.send(json.dumps(result, separators=(",", ":")))
+        except Exception:
+            pass
+
+    def close_rtc_session(self, session_id: str):
+        if not session_id or not self.rtc_loop:
+            return
+        future = self.run_rtc_coro(self.close_rtc_session_async(session_id))
+        if future:
+            future.add_done_callback(lambda item: self.log_rtc_future("close", session_id, item))
+
+    def close_all_rtc_sessions(self):
+        if not self.rtc_loop:
+            return
+        with self.rtc_lock:
+            session_ids = list(self.rtc_sessions.keys())
+        for session_id in session_ids:
+            self.close_rtc_session(session_id)
+
+    async def close_rtc_session_async(self, session_id: str):
+        with self.rtc_lock:
+            session = self.rtc_sessions.pop(session_id, None)
+        if not session:
+            return
+        pc = session.get("pc")
+        if pc:
+            await pc.close()
+
+    async def selected_candidate_type(self, pc) -> str:
+        try:
+            stats = await pc.getStats()
+            for report in stats.values():
+                if getattr(report, "type", "") != "candidate-pair" or not getattr(report, "selected", False):
+                    continue
+                remote_id = getattr(report, "remoteCandidateId", "")
+                local_id = getattr(report, "localCandidateId", "")
+                candidate = stats.get(local_id) or stats.get(remote_id)
+                candidate_type = getattr(candidate, "candidateType", "") if candidate else ""
+                return candidate_type or "unknown"
+        except Exception:
+            pass
+        return "unknown"
 
     def macos_capture_bridge_enabled(self) -> bool:
         return platform_name() == "macos" and os.environ.get("BHZN_MAC_CAPTURE_BRIDGE") == "1"
@@ -893,6 +1157,29 @@ class DesktopAgent:
                     sct.close()
                 except Exception:
                     pass
+
+    def capture_image_for_rtc(self) -> Image.Image:
+        if platform_name() == "macos" and self.quartz_capture_available():
+            image, monitor = self.capture_quartz_display()
+        else:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                shot = sct.grab(monitor)
+                image = Image.frombytes("RGB", shot.size, shot.rgb)
+        self.screen = {
+            "width": 0,
+            "height": 0,
+            "inputWidth": int(monitor["width"]),
+            "inputHeight": int(monitor["height"]),
+        }
+        self.input_origin = {
+            "x": int(monitor.get("left", 0)),
+            "y": int(monitor.get("top", 0)),
+        }
+        image = self.resize_for_wire(image, MAX_SIDE)
+        self.screen["width"], self.screen["height"] = image.size
+        self.capture_enabled = True
+        return image
 
     def send_frame(self, image: Image.Image, monitor: dict, fast_frame: bool):
         self.screen = {

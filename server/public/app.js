@@ -60,6 +60,13 @@ const ctx = canvas.getContext("2d");
 const remoteCursor = document.createElement("div");
 remoteCursor.className = "remote-cursor hidden";
 viewer.appendChild(remoteCursor);
+rtcVideo.addEventListener("loadedmetadata", () => {
+  if (!rtcState || !rtcVideo.videoWidth || !rtcVideo.videoHeight) return;
+  canvas.width = rtcVideo.videoWidth;
+  canvas.height = rtcVideo.videoHeight;
+  frameSize = { width: rtcVideo.videoWidth, height: rtcVideo.videoHeight };
+  viewer.style.aspectRatio = `${rtcVideo.videoWidth} / ${rtcVideo.videoHeight}`;
+});
 const closeScreenBtn = document.getElementById("closeScreenBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
 const backBtn = document.getElementById("backBtn");
@@ -1241,6 +1248,7 @@ function closeRtc(reason = "closed", notify = true) {
   const state = rtcState;
   rtcState = null;
   clearTimeout(state?.fallbackTimer);
+  clearTimeout(state?.controlTimer);
   try {
     state?.controlChannel?.close();
   } catch {
@@ -1302,11 +1310,23 @@ async function handleRtcReady(msg) {
     sessionId: msg.sessionId,
     deviceId: msg.deviceId,
     connected: false,
-    fallbackTimer: setTimeout(() => fallbackToRelay("rtc_timeout"), 8000)
+    fallbackTimer: setTimeout(() => fallbackToRelay("rtc_timeout"), 8000),
+    controlTimer: setTimeout(() => {
+      if (rtcState?.sessionId === msg.sessionId && rtcState.controlChannel?.readyState !== "open") {
+        fallbackToRelay("rtc_control_timeout");
+      }
+    }, 10000)
   };
   controlChannel.addEventListener("open", () => {
     if (rtcState?.sessionId !== msg.sessionId) return;
+    clearTimeout(rtcState.controlTimer);
     activeMeta.textContent = "直连控制通道已建立";
+  });
+  controlChannel.addEventListener("close", () => {
+    if (rtcState?.sessionId === msg.sessionId && rtcState.connected) fallbackToRelay("rtc_control_closed");
+  });
+  controlChannel.addEventListener("error", () => {
+    if (rtcState?.sessionId === msg.sessionId) fallbackToRelay("rtc_control_error");
   });
   controlChannel.addEventListener("message", (event) => {
     let payload;
@@ -1705,8 +1725,12 @@ function sendInput(payload) {
     return;
   }
   const message = { type: "input", sessionId, inputId: `h5-${Date.now()}-${++inputSerial}`, ...payload };
-  if (rtcState?.controlChannel?.readyState === "open" && rtcState.sessionId === sessionId) {
-    rtcState.controlChannel.send(JSON.stringify(message));
+  if (rtcState?.sessionId === sessionId) {
+    if (rtcState.controlChannel?.readyState === "open") {
+      rtcState.controlChannel.send(JSON.stringify(message));
+    } else {
+      activeMeta.textContent = "直连控制通道连接中";
+    }
     return;
   }
   ws.send(JSON.stringify(message));
