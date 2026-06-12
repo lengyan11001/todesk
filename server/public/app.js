@@ -49,6 +49,7 @@ const wallControlCloseBtn = document.getElementById("wallControlCloseBtn");
 const wallControlBackBtn = document.getElementById("wallControlBackBtn");
 const wallControlHomeBtn = document.getElementById("wallControlHomeBtn");
 const wallControlHomeSwipeBtn = document.getElementById("wallControlHomeSwipeBtn");
+const wallResizeHandles = Array.from(document.querySelectorAll("[data-wall-resize]"));
 const viewer = document.getElementById("viewer");
 const canvas = document.getElementById("screenCanvas");
 const ctx = canvas.getContext("2d");
@@ -103,6 +104,7 @@ let wallDragLastSentAt = 0;
 let wallDragMoved = false;
 let wallDragStartedRemote = false;
 let wallDragButton = "left";
+let wallResizeState = null;
 let wallPendingText = "";
 let wallPendingTextTimer = 0;
 let fileTransfers = [];
@@ -643,6 +645,7 @@ function openWallControl(deviceId) {
   wallActiveDeviceId = String(deviceId || "").trim().toUpperCase();
   const device = devices.find((item) => item.id === wallActiveDeviceId);
   wallControlWindow.classList.remove("hidden");
+  normalizeWallControlBounds();
   wallControlViewer.classList.remove("has-frame");
   wallFrameSize = { width: 0, height: 0 };
   wallFrameDrawSerial += 1;
@@ -667,6 +670,7 @@ function closeWallControl(resetActive = true) {
   wallDragMoved = false;
   wallDragStartedRemote = false;
   wallDragButton = "left";
+  wallResizeState = null;
   setWallInputReady(false);
   wallControlWindow.classList.add("hidden");
   wallControlViewer.classList.remove("has-frame");
@@ -690,6 +694,109 @@ async function toggleWallTileFullscreen(tile) {
   } else {
     await tile.requestFullscreen().catch(() => {});
   }
+}
+
+function wallControlMinSize() {
+  const styles = getComputedStyle(wallControlWindow);
+  return {
+    width: Number.parseFloat(styles.minWidth) || 360,
+    height: Number.parseFloat(styles.minHeight) || 460
+  };
+}
+
+function clampWallRect(rect) {
+  const margin = 8;
+  const min = wallControlMinSize();
+  const maxWidth = Math.max(min.width, window.innerWidth - margin * 2);
+  const maxHeight = Math.max(min.height, window.innerHeight - margin * 2);
+  let width = Math.max(min.width, Math.min(maxWidth, rect.width));
+  let height = Math.max(min.height, Math.min(maxHeight, rect.height));
+  let left = rect.left;
+  let top = rect.top;
+  left = Math.max(margin, Math.min(window.innerWidth - margin - width, left));
+  top = Math.max(margin, Math.min(window.innerHeight - margin - height, top));
+  return { left, top, width, height };
+}
+
+function setWallControlRect(rect) {
+  const next = clampWallRect(rect);
+  wallControlWindow.style.left = `${Math.round(next.left)}px`;
+  wallControlWindow.style.top = `${Math.round(next.top)}px`;
+  wallControlWindow.style.right = "auto";
+  wallControlWindow.style.bottom = "auto";
+  wallControlWindow.style.width = `${Math.round(next.width)}px`;
+  wallControlWindow.style.height = `${Math.round(next.height)}px`;
+}
+
+function normalizeWallControlBounds() {
+  if (document.fullscreenElement === wallControlWindow) return;
+  const rect = wallControlWindow.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  setWallControlRect(rect);
+}
+
+function beginWallResize(event) {
+  if (document.fullscreenElement === wallControlWindow) return;
+  const handle = event.currentTarget.dataset.wallResize;
+  if (!handle) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = wallControlWindow.getBoundingClientRect();
+  wallResizeState = {
+    handle,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  };
+  event.currentTarget.setPointerCapture(event.pointerId);
+}
+
+function moveWallResize(event) {
+  if (!wallResizeState || event.pointerId !== wallResizeState.pointerId) return;
+  event.preventDefault();
+  const dx = event.clientX - wallResizeState.startX;
+  const dy = event.clientY - wallResizeState.startY;
+  const min = wallControlMinSize();
+  const right = wallResizeState.left + wallResizeState.width;
+  const bottom = wallResizeState.top + wallResizeState.height;
+  const rect = {
+    left: wallResizeState.left,
+    top: wallResizeState.top,
+    width: wallResizeState.width,
+    height: wallResizeState.height
+  };
+  if (wallResizeState.handle.includes("e")) {
+    rect.width = wallResizeState.width + dx;
+  }
+  if (wallResizeState.handle.includes("s")) {
+    rect.height = wallResizeState.height + dy;
+  }
+  if (wallResizeState.handle.includes("w")) {
+    rect.left = wallResizeState.left + dx;
+    rect.width = wallResizeState.width - dx;
+    if (rect.width < min.width) {
+      rect.width = min.width;
+      rect.left = right - min.width;
+    }
+  }
+  if (wallResizeState.handle.includes("n")) {
+    rect.top = wallResizeState.top + dy;
+    rect.height = wallResizeState.height - dy;
+    if (rect.height < min.height) {
+      rect.height = min.height;
+      rect.top = bottom - min.height;
+    }
+  }
+  setWallControlRect(rect);
+}
+
+function endWallResize(event) {
+  if (!wallResizeState || event.pointerId !== wallResizeState.pointerId) return;
+  wallResizeState = null;
 }
 
 async function updateBinding(device, patch) {
@@ -1596,6 +1703,17 @@ wallControlCanvas.addEventListener("wheel", (event) => {
     deltaY: Math.round(event.deltaY)
   });
 }, { passive: false });
+
+for (const handle of wallResizeHandles) {
+  handle.addEventListener("pointerdown", beginWallResize);
+  handle.addEventListener("pointermove", moveWallResize);
+  handle.addEventListener("pointerup", endWallResize);
+  handle.addEventListener("pointercancel", endWallResize);
+}
+
+window.addEventListener("resize", () => {
+  if (isWallControlOpen()) normalizeWallControlBounds();
+});
 
 closeScreenBtn.addEventListener("click", () => closeScreen(true));
 fullscreenBtn.addEventListener("click", toggleViewerFullscreen);

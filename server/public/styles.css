@@ -721,7 +721,6 @@ input[type="file"] {
   min-height: 460px;
   max-width: calc(100vw - 28px);
   max-height: calc(100vh - 28px);
-  resize: both;
   overflow: hidden;
   background: #ffffff;
   border: 1px solid #bfcede;
@@ -729,6 +728,7 @@ input[type="file"] {
   box-shadow: 0 26px 76px rgba(17, 31, 45, .26);
   display: grid;
   grid-template-rows: auto 1fr;
+  user-select: none;
 }
 
 .wall-control-window:fullscreen {
@@ -738,7 +738,70 @@ input[type="file"] {
   max-height: none;
   border: 0;
   border-radius: 0;
-  resize: none;
+}
+
+.wall-resize-handle {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  z-index: 4;
+  pointer-events: auto;
+}
+
+.wall-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 2px solid rgba(22, 119, 255, .72);
+  opacity: .7;
+}
+
+.wall-resize-nw {
+  left: 0;
+  top: 0;
+  cursor: nwse-resize;
+}
+
+.wall-resize-nw::after {
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.wall-resize-ne {
+  right: 0;
+  top: 0;
+  cursor: nesw-resize;
+}
+
+.wall-resize-ne::after {
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.wall-resize-sw {
+  left: 0;
+  bottom: 0;
+  cursor: nesw-resize;
+}
+
+.wall-resize-sw::after {
+  border-right: 0;
+  border-top: 0;
+}
+
+.wall-resize-se {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
+}
+
+.wall-resize-se::after {
+  border-left: 0;
+  border-top: 0;
+}
+
+.wall-control-window:fullscreen .wall-resize-handle {
+  display: none;
 }
 
 .wall-control-titlebar {
