@@ -108,6 +108,7 @@ let wallResizeState = null;
 let wallPendingText = "";
 let wallPendingTextTimer = 0;
 let fileTransfers = [];
+let inputSerial = 0;
 
 function devicePlatform(device) {
   return String(device?.platform || "android").toLowerCase();
@@ -141,6 +142,17 @@ function hasInputPermission(device) {
   }
   if (devicePlatform(device) === "android") return false;
   return Boolean(permissions.accessibility);
+}
+
+function canControlDevice(device) {
+  return Boolean(hasScreenPermission(device) && hasInputPermission(device));
+}
+
+function controlBlockReason(device) {
+  if (!device?.online) return "设备不在线";
+  if (!hasScreenPermission(device)) return `${platformText(device)} 端屏幕权限未就绪`;
+  if (!hasInputPermission(device)) return `${platformText(device)} 端输入服务未就绪`;
+  return "";
 }
 
 function platformText(device) {
@@ -313,7 +325,7 @@ function connect() {
       canvas.focus({ preventScroll: true });
       activeMeta.textContent = canControlDevice(msg.device)
         ? `${deviceName(msg.device)} · ${msg.device.model || msg.device.osVersion || "未知型号"}`
-        : `已进入画面，仅可观看：${platformText(msg.device)} 端未开启控制权限或允许控制开关`;
+        : `已进入画面，仅可观看：${controlBlockReason(msg.device) || "控制未就绪"}`;
     }
     if (msg.type === "frame") {
       handleTextFrame(msg);
@@ -329,6 +341,15 @@ function connect() {
       sessionId = "";
       setControls(false);
       if (screenOpen) activeMeta.textContent = `控制已停止：${msg.reason || "ended"}`;
+    }
+    if (msg.type === "input-result" && msg.ok === false) {
+      const targetDeviceId = String(msg.deviceId || "").toUpperCase();
+      if (targetDeviceId === activeDeviceId && screenOpen) {
+        activeMeta.textContent = `输入执行失败：${msg.error || "dispatch_failed"}`;
+      }
+      if (targetDeviceId === wallActiveDeviceId && isWallControlOpen()) {
+        wallControlMeta.textContent = `输入执行失败：${msg.error || "dispatch_failed"}`;
+      }
     }
     if (msg.type === "error") {
       const errorDeviceId = String(msg.device?.id || msg.deviceId || "").toUpperCase();
@@ -940,16 +961,14 @@ function syncActiveDeviceState() {
   stopBtn.disabled = !sessionId;
   if (sessionId && canControlDevice(device)) {
     activeMeta.textContent = `${deviceName(device)} · ${device.model || device.osVersion || "未知型号"} · 可操作`;
+  } else if (sessionId) {
+    activeMeta.textContent = `已进入画面，仅可观看：${controlBlockReason(device) || "控制未就绪"}`;
   }
 }
 
 function setControls(enabled) {
   setInputReady(enabled);
   stopBtn.disabled = !enabled;
-}
-
-function canControlDevice(device) {
-  return Boolean(device?.controlEnabled && hasScreenPermission(device) && hasInputPermission(device));
 }
 
 function setInputReady(enabled) {
@@ -981,7 +1000,7 @@ function setStageTab(tab) {
 function errorText(msg) {
   const device = msg.device || {};
   if (msg.error === "screen_not_ready") return `设备已在线，但 ${platformText(device)} 端还没有开启屏幕权限`;
-  if (msg.error === "input_not_ready") return `当前仅可观看：${platformText(device)} 端输入控制未就绪，请确认客户端录屏、输入服务和允许网页控制均已就绪`;
+  if (msg.error === "input_not_ready") return `当前仅可观看：${controlBlockReason(device) || "控制未就绪"}`;
   if (msg.error === "device_offline") return "设备不在线";
   if (msg.error === "device_not_bound") return "设备还没有绑定到当前账号";
   if (msg.error === "bad_verification_code") return "设备验证码不正确";
@@ -1273,11 +1292,11 @@ function sendInput(payload) {
     if (screenOpen && !sessionId) resumeActiveControl();
     if (sessionId && !inputReady) {
       const activeDevice = devices.find((item) => item.id === activeDeviceId);
-      activeMeta.textContent = `当前仅可观看：${platformText(activeDevice)} 端未开启控制权限或允许控制开关`;
+      activeMeta.textContent = `当前仅可观看：${controlBlockReason(activeDevice) || "控制未就绪"}`;
     }
     return;
   }
-  ws.send(JSON.stringify({ type: "input", sessionId, ...payload }));
+  ws.send(JSON.stringify({ type: "input", sessionId, inputId: `h5-${Date.now()}-${++inputSerial}`, ...payload }));
 }
 
 function sendWallInput(payload) {
@@ -1286,7 +1305,7 @@ function sendWallInput(payload) {
     updateWallControlState();
     return;
   }
-  ws.send(JSON.stringify({ type: "input", sessionId: wallSessionId, ...payload }));
+  ws.send(JSON.stringify({ type: "input", sessionId: wallSessionId, inputId: `h5-${Date.now()}-${++inputSerial}`, ...payload }));
 }
 
 function isTypingTarget(target) {

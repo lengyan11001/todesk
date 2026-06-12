@@ -213,20 +213,6 @@ public class MainActivity extends Activity {
         });
         content.addView(saveServer, blockParams());
 
-        Switch controlSwitch = new Switch(this);
-        controlSwitch.setText("允许网页控制本机");
-        controlSwitch.setTextSize(16);
-        controlSwitch.setChecked(AppPrefs.controlEnabled(this));
-        controlSwitch.setPadding(dp(8), dp(14), dp(8), dp(14));
-        controlSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                AppPrefs.setControlEnabled(MainActivity.this, isChecked);
-                render();
-            }
-        });
-        content.addView(controlSwitch, blockParams());
-
         String state = "录屏：" + yesNo(media)
                 + "    无障碍：" + yesNo(accessibility)
                 + "    输入服务：" + yesNo(input)
@@ -316,9 +302,9 @@ public class MainActivity extends Activity {
                     }
                 }
         );
-        String ready = media && input && AppPrefs.controlEnabled(this)
+        String ready = media && input
                 ? "设备已准备好，在 H5 输入设备 ID 即可发起控制。"
-                : "请先补齐录屏、无障碍输入服务和允许网页控制开关。";
+                : "请先补齐录屏和无障碍输入服务。";
         card("接管准备状态", ready, 16, false);
     }
 

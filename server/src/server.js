@@ -476,7 +476,14 @@ function canViewDevice(device) {
 }
 
 function canControlDevice(device) {
-  return Boolean(device?.controlEnabled && hasScreenPermission(device) && hasInputPermission(device));
+  return Boolean(hasScreenPermission(device) && hasInputPermission(device));
+}
+
+function controlBlockReason(device) {
+  if (!device) return "device_offline";
+  if (!hasScreenPermission(device)) return "screen_not_ready";
+  if (!hasInputPermission(device)) return "input_control_not_ready";
+  return "";
 }
 
 function bindingView(binding) {
@@ -1175,6 +1182,32 @@ wss.on("connection", (ws) => {
         });
         return;
       }
+
+      if (msg.type === "input-result") {
+        const sessionId = String(msg.sessionId || "");
+        const controller = controllers.get(sessionId);
+        relayLog("input.result", {
+          sessionId,
+          inputId: String(msg.inputId || ""),
+          deviceId: ws.deviceId,
+          userId: controller?.userId || "",
+          action: String(msg.action || ""),
+          ok: Boolean(msg.ok),
+          error: String(msg.error || "")
+        });
+        if (controller?.ws && controller.ws.readyState === WebSocket.OPEN) {
+          send(controller.ws, {
+            type: "input-result",
+            sessionId,
+            inputId: String(msg.inputId || ""),
+            deviceId: ws.deviceId,
+            action: String(msg.action || ""),
+            ok: Boolean(msg.ok),
+            error: String(msg.error || "")
+          });
+        }
+        return;
+      }
       return;
     }
 
@@ -1221,12 +1254,35 @@ wss.on("connection", (ws) => {
           return;
         }
         if (!canControlDevice(device)) {
-          send(ws, { type: "error", error: "input_not_ready", device: deviceView(device) });
+          const reason = controlBlockReason(device);
+          relayLog("input.blocked", {
+            sessionId,
+            userId: ws.userId,
+            deviceId: device.id,
+            action: String(msg.action || ""),
+            reason,
+            controlEnabled: Boolean(device.controlEnabled),
+            permissions: device.permissions || {}
+          });
+          send(ws, { type: "error", error: "input_not_ready", reason, device: deviceView(device) });
           return;
         }
+        const inputId = String(msg.inputId || crypto.randomBytes(6).toString("hex"));
+        relayLog("input.forward", {
+          sessionId,
+          inputId,
+          userId: ws.userId,
+          deviceId: device.id,
+          action: String(msg.action || ""),
+          x: Number(msg.x || 0),
+          y: Number(msg.y || 0),
+          x2: Number(msg.x2 || 0),
+          y2: Number(msg.y2 || 0)
+        });
         send(device.ws, {
           type: "input",
           sessionId,
+          inputId,
           action: msg.action,
           x: Number(msg.x || 0),
           y: Number(msg.y || 0),

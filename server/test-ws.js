@@ -23,8 +23,8 @@ device.on("open", () => {
     id: "TEST-1001",
     name: "Test Phone",
     model: "Node Sim",
-    permissions: { mediaProjection: true, accessibility: true },
-    controlEnabled: true,
+    permissions: { mediaProjection: true, accessibility: true, inputControl: true },
+    controlEnabled: false,
     screen: { width: 360, height: 720 }
   });
 });

@@ -391,7 +391,7 @@ public class RemoteService extends Service {
         JsonUtil.put(msg, "agentVersion", BuildConfig.VERSION_NAME);
         JsonUtil.put(msg, "androidVersion", Build.VERSION.RELEASE);
         JsonUtil.put(msg, "permissions", PermissionState.toJson(this, mediaReady));
-        JsonUtil.put(msg, "controlEnabled", AppPrefs.controlEnabled(this) && mediaReady && PermissionState.isInputControlReady(this));
+        JsonUtil.put(msg, "controlEnabled", mediaReady && PermissionState.isInputControlReady(this));
         JSONObject screen = JsonUtil.object();
         JsonUtil.put(screen, "width", screenWidth);
         JsonUtil.put(screen, "height", screenHeight);
@@ -431,6 +431,7 @@ public class RemoteService extends Service {
                     scaleInputY(msg, "y2"),
                     msg.optLong("duration", 80)
             );
+            sendInputResult(msg, ok);
             if (!ok) {
                 Log.w(TAG, "remote input failed: action=" + action
                         + ", accessibility=" + PermissionState.isAccessibilityEnabled(this)
@@ -443,6 +444,22 @@ public class RemoteService extends Service {
             sendStatus();
         } else if ("file-transfer".equals(type)) {
             handleFileTransfer(msg);
+        }
+    }
+
+    private void sendInputResult(JSONObject input, boolean ok) {
+        JSONObject msg = JsonUtil.object();
+        JsonUtil.put(msg, "type", "input-result");
+        JsonUtil.put(msg, "sessionId", input.optString("sessionId"));
+        JsonUtil.put(msg, "inputId", input.optString("inputId"));
+        JsonUtil.put(msg, "action", input.optString("action"));
+        JsonUtil.put(msg, "ok", ok);
+        if (!ok) {
+            JsonUtil.put(msg, "error", PermissionState.isInputControlReady(this) ? "dispatch_failed" : "input_service_not_ready");
+        }
+        SimpleWebSocket socket = webSocket;
+        if (socket != null) {
+            socket.send(msg.toString());
         }
     }
 
