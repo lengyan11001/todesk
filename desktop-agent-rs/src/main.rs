@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod capture;
 mod config;
 mod file_transfer;
@@ -23,7 +25,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.7-rs";
+const AGENT_VERSION: &str = "0.2.8-rs";
 const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FAST_FRAME_MS: u64 = 900;
@@ -35,9 +37,16 @@ enum OutboundEvent {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Err(error) = run_main(args.clone()).await {
+        report_startup_error(&args, &format!("{error:#}"));
+        std::process::exit(1);
+    }
+}
+
+async fn run_main(args: Vec<String>) -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if handle_maintenance_args(&args).await? {
         return Ok(());
     }
@@ -64,6 +73,26 @@ async fn main() -> Result<()> {
     }
 
     run_forever(config).await
+}
+
+fn report_startup_error(args: &[String], message: &str) {
+    let headless = args.iter().any(|item| item == "--headless" || item == "--check-update");
+    if headless {
+        eprintln!("{message}");
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let title = HSTRING::from("BHZN ToDesk");
+        let body = HSTRING::from(format!("启动失败：\n{message}"));
+        unsafe {
+            let _ = MessageBoxW(None, &body, &title, MB_OK | MB_ICONERROR);
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("{message}");
 }
 
 async fn handle_maintenance_args(args: &[String]) -> Result<bool> {

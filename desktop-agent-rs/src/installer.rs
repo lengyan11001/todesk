@@ -1,10 +1,16 @@
 use std::{
     env, fs,
+    ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const APP_DIR_NAME: &str = "BHZN-ToDesk";
 const EXE_NAME: &str = "BHZN-ToDesk-Agent.exe";
@@ -34,7 +40,7 @@ pub fn install_self(start_after: bool) -> Result<()> {
     register_startup(&target)?;
     register_update_task(&target)?;
     if start_after {
-        let _ = Command::new(&target).arg("--no-auto-install").spawn();
+        let _ = hidden_command(&target).arg("--no-auto-install").spawn();
     }
     println!("BHZN ToDesk Agent installed: {}", target.display());
     Ok(())
@@ -54,7 +60,7 @@ pub fn installed_exe_path() -> Result<PathBuf> {
 
 pub fn register_startup(exe: &Path) -> Result<()> {
     let command = format!("\"{}\" --headless --no-auto-install", exe.display());
-    let status = Command::new("reg")
+    let status = hidden_command("reg")
         .args([
             "add",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -75,7 +81,7 @@ pub fn register_startup(exe: &Path) -> Result<()> {
 }
 
 pub fn unregister_startup() -> Result<()> {
-    let _ = Command::new("reg")
+    let _ = hidden_command("reg")
         .args([
             "delete",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
@@ -89,7 +95,7 @@ pub fn unregister_startup() -> Result<()> {
 
 fn register_update_task(exe: &Path) -> Result<()> {
     let task_command = format!("\"{}\" --check-update --headless --no-auto-install", exe.display());
-    let status = Command::new("schtasks")
+    let status = hidden_command("schtasks")
         .args([
             "/Create",
             "/TN",
@@ -111,9 +117,19 @@ fn register_update_task(exe: &Path) -> Result<()> {
 }
 
 fn unregister_update_task() {
-    let _ = Command::new("schtasks").args(["/Delete", "/TN", UPDATE_TASK, "/F"]).status();
+    let _ = hidden_command("schtasks").args(["/Delete", "/TN", UPDATE_TASK, "/F"]).status();
 }
 
 pub fn current_exe() -> Result<PathBuf> {
     Ok(env::current_exe()?.canonicalize()?)
+}
+
+fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
