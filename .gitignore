@@ -43,6 +43,7 @@ desktop-agent-rs/test-agent.json
 
 # Android build output and signing material
 android/.gradle/
+android/.deps/
 android/app/build/
 android/build/
 android/manual-build/

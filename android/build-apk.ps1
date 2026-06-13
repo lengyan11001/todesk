@@ -1,8 +1,9 @@
 param(
     [string]$AndroidSdk = "D:\",
     [string]$JavaHome = "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot",
-    [int]$VersionCode = 11,
-    [string]$VersionName = "0.1.10",
+    [int]$VersionCode = 12,
+    [string]$VersionName = "0.1.11",
+    [string]$WebRtcVersion = "144.7559.09",
     [ValidateSet("debug", "release")]
     [string]$Channel = "release",
     [string]$Keystore = "",
@@ -16,6 +17,8 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $App = Join-Path $Root "app"
 $Build = Join-Path $Root "manual-build"
+$Deps = Join-Path $Root ".deps"
+$AarWork = Join-Path $Build "webrtc-aar"
 $KeystoreDir = Join-Path $Root "keystore"
 $BuildTools = Join-Path $AndroidSdk "build-tools\34.0.0"
 $PlatformJar = Join-Path $AndroidSdk "platforms\android-34\android.jar"
@@ -48,7 +51,29 @@ New-Item -ItemType Directory -Force -Path `
     "$Build\gen", `
     "$Build\classes", `
     "$Build\dex", `
+    "$Build\libs", `
+    "$Build\native-libs", `
     "$Build\out" | Out-Null
+
+$WebRtcAar = Join-Path $Deps "webrtc-android-$WebRtcVersion.aar"
+$WebRtcZip = Join-Path $Deps "webrtc-android-$WebRtcVersion.zip"
+New-Item -ItemType Directory -Force -Path $Deps | Out-Null
+if (!(Test-Path $WebRtcAar)) {
+    Invoke-WebRequest `
+        -UseBasicParsing `
+        -Uri "https://repo.maven.apache.org/maven2/io/github/webrtc-sdk/android/$WebRtcVersion/android-$WebRtcVersion.aar" `
+        -OutFile $WebRtcAar `
+        -TimeoutSec 180
+}
+Copy-Item -LiteralPath $WebRtcAar -Destination $WebRtcZip -Force
+Remove-Item -LiteralPath $AarWork -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive -LiteralPath $WebRtcZip -DestinationPath $AarWork -Force
+$WebRtcJar = Join-Path $AarWork "classes.jar"
+if (!(Test-Path $WebRtcJar)) { throw "WebRTC classes.jar not found in $WebRtcAar" }
+Copy-Item -LiteralPath $WebRtcJar -Destination "$Build\libs\webrtc-android.jar" -Force
+if (Test-Path "$AarWork\jni") {
+    Copy-Item -Path "$AarWork\jni\*" -Destination "$Build\native-libs" -Recurse -Force
+}
 
 Invoke-Native $Aapt2 @("compile", "--dir", "$App\src\main\res", "-o", "$Build\compiled-res")
 
@@ -75,7 +100,7 @@ $javacArgs = @(
     "-source", "8",
     "-target", "8",
     "-bootclasspath", $PlatformJar,
-    "-classpath", $PlatformJar,
+    "-classpath", "$PlatformJar;$Build\libs\webrtc-android.jar",
     "-d", "$Build\classes"
 ) + $sources
 Invoke-Native $Javac $javacArgs
@@ -86,7 +111,7 @@ $d8Args = @(
     "--min-api", "26",
     "--lib", $PlatformJar,
     "--output", "$Build\dex"
-) + $classFiles
+) + $classFiles + @("$Build\libs\webrtc-android.jar")
 Invoke-Native $D8 $d8Args
 
 Copy-Item -LiteralPath "$Build\unsigned.apk" -Destination "$Build\with-dex.apk"
@@ -96,6 +121,15 @@ try {
     $entry = $apk.GetEntry("classes.dex")
     if ($entry) { $entry.Delete() }
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$Build\dex\classes.dex", "classes.dex") | Out-Null
+    if (Test-Path "$Build\native-libs") {
+        Get-ChildItem -LiteralPath "$Build\native-libs" -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring((Resolve-Path "$Build\native-libs").Path.Length).TrimStart('\','/')
+            $apkPath = ("lib/" + ($relative -replace "\\", "/"))
+            $old = $apk.GetEntry($apkPath)
+            if ($old) { $old.Delete() }
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, $_.FullName, $apkPath) | Out-Null
+        }
+    }
 } finally {
     $apk.Dispose()
 }

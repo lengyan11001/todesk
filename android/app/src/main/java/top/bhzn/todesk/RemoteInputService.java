@@ -149,6 +149,10 @@ public class RemoteInputService extends AccessibilityService {
     }
 
     private boolean handleKey(String key, String code) {
+        if (key != null && key.length() > 0 && key.codePointCount(0, key.length()) == 1
+                && !" ".equals(key) && androidKeyCode(key, code) == KeyEvent.KEYCODE_UNKNOWN) {
+            return commitText(key);
+        }
         int keyCode = androidKeyCode(key, code);
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
             return false;
@@ -267,6 +271,10 @@ public class RemoteInputService extends AccessibilityService {
 
     private boolean insertTextIntoNode(AccessibilityNodeInfo node, String inserted) {
         node.refresh();
+        if (!node.isFocused()) {
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            node.refresh();
+        }
         CharSequence existingText = node.getText();
         String existing = existingText == null || isHintText(node) ? "" : existingText.toString();
         int start = node.getTextSelectionStart();
@@ -286,6 +294,10 @@ public class RemoteInputService extends AccessibilityService {
 
     private boolean applyKeyToNode(AccessibilityNodeInfo node, int keyCode) {
         node.refresh();
+        if (!node.isFocused()) {
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            node.refresh();
+        }
         CharSequence existingText = node.getText();
         String existing = existingText == null || isHintText(node) ? "" : existingText.toString();
         int start = node.getTextSelectionStart();

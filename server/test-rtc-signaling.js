@@ -116,7 +116,7 @@ async function main() {
       permissions: { screenCapture: true, inputControl: true },
       controlEnabled: true,
       screen: { width: 1280, height: 720, inputWidth: 1280, inputHeight: 720 },
-      rtcCapabilities: { webrtc: true, video: true, dataChannel: true, localNetwork: true, codecs: ["H264", "VP8"], version: "test" }
+      rtcCapabilities: { webrtc: true, video: false, dataChannel: true, frameChannel: true, localNetwork: true, codecs: [], maxFps: 15, version: "test" }
     });
     send(controller, { type: "hello-controller", token: login.token });
     await waitFor(device, (msg) => msg.type === "hello", "device hello");

@@ -7,6 +7,8 @@ use crate::{capture::CaptureState, config::AgentConfig};
 pub enum ClientEvent {
     HelloDevice(DeviceStatus),
     Heartbeat(DeviceStatus),
+    RtcAnswer(RtcSdp),
+    RtcIceCandidate(RtcIceCandidateSignal),
     RtcState(RtcState),
     RtcStop(RtcStop),
     #[serde(rename = "file-transfer-status")]
@@ -63,6 +65,7 @@ pub struct RtcCapabilities {
     pub webrtc: bool,
     pub video: bool,
     pub data_channel: bool,
+    pub frame_channel: bool,
     pub local_network: bool,
     pub codecs: Vec<String>,
     pub max_fps: u32,
@@ -70,17 +73,44 @@ pub struct RtcCapabilities {
 }
 
 impl RtcCapabilities {
-    pub fn pending_native(version: &str) -> Self {
+    pub fn frame_channel(version: &str) -> Self {
         Self {
-            webrtc: false,
+            webrtc: true,
             video: false,
-            data_channel: false,
+            data_channel: true,
+            frame_channel: true,
             local_network: true,
             codecs: Vec::new(),
-            max_fps: 0,
-            version: format!("{version};native-webrtc-pending"),
+            max_fps: 15,
+            version: format!("{version};rtc-frame-channel"),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtcSdp {
+    pub session_id: String,
+    pub device_id: String,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtcIceCandidate {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    #[serde(rename = "sdpMLineIndex")]
+    pub sdp_mline_index: Option<u16>,
+    pub username_fragment: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtcIceCandidateSignal {
+    pub session_id: String,
+    pub device_id: String,
+    pub candidate: RtcIceCandidate,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +126,7 @@ pub struct RtcState {
 }
 
 impl RtcState {
+    #[allow(dead_code)]
     pub fn failed(device_id: &str, session_id: &str, error: &str) -> Self {
         Self {
             session_id: session_id.to_string(),
@@ -141,7 +172,7 @@ impl DeviceStatus {
             control_enabled: true,
             screen,
             verification_code: config.verification_code.clone(),
-            rtc_capabilities: RtcCapabilities::pending_native(version),
+            rtc_capabilities: RtcCapabilities::frame_channel(version),
         }
     }
 }
@@ -179,6 +210,8 @@ pub enum ServerEvent {
         _device_id: Option<String>,
         #[serde(rename = "controllerId")]
         _controller_id: Option<String>,
+        #[serde(rename = "iceServers", default)]
+        ice_servers: Vec<RtcIceServer>,
         _mode: Option<String>,
     },
     #[serde(rename = "rtc-offer")]
@@ -187,7 +220,7 @@ pub enum ServerEvent {
         session_id: String,
         #[serde(rename = "deviceId")]
         _device_id: Option<String>,
-        _sdp: Option<String>,
+        sdp: Option<String>,
     },
     #[serde(rename = "rtc-ice-candidate")]
     RtcIceCandidate {
@@ -195,7 +228,7 @@ pub enum ServerEvent {
         session_id: String,
         #[serde(rename = "deviceId")]
         _device_id: Option<String>,
-        _candidate: Option<serde_json::Value>,
+        candidate: Option<RtcIceCandidate>,
     },
     #[serde(rename = "rtc-stopped")]
     RtcStopped {
@@ -245,6 +278,30 @@ pub struct InputEvent {
     pub modifiers: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtcIceServer {
+    pub urls: RtcIceServerUrls,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RtcIceServerUrls {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RtcIceServerUrls {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +311,7 @@ mod tests {
         let json = serde_json::to_value(ClientEvent::RtcState(RtcState::failed(
             "ABCD-1234",
             "session-1",
-            "native_webrtc_pending",
+            "start_failed",
         )))
         .unwrap();
 
@@ -263,7 +320,7 @@ mod tests {
         assert_eq!(json["deviceId"], "ABCD-1234");
         assert_eq!(json["state"], "failed");
         assert_eq!(json["selectedCandidateType"], "unknown");
-        assert_eq!(json["error"], "native_webrtc_pending");
+        assert_eq!(json["error"], "start_failed");
     }
 
     #[test]
@@ -280,13 +337,14 @@ mod tests {
     }
 
     #[test]
-    fn serializes_pending_rtc_capabilities() {
-        let capabilities = serde_json::to_value(RtcCapabilities::pending_native("0.2.9-rs")).unwrap();
+    fn serializes_frame_channel_rtc_capabilities() {
+        let capabilities = serde_json::to_value(RtcCapabilities::frame_channel("0.2.9-rs")).unwrap();
 
-        assert_eq!(capabilities["webrtc"], false);
+        assert_eq!(capabilities["webrtc"], true);
         assert_eq!(capabilities["video"], false);
-        assert_eq!(capabilities["dataChannel"], false);
+        assert_eq!(capabilities["dataChannel"], true);
+        assert_eq!(capabilities["frameChannel"], true);
         assert_eq!(capabilities["localNetwork"], true);
-        assert_eq!(capabilities["version"], "0.2.9-rs;native-webrtc-pending");
+        assert_eq!(capabilities["version"], "0.2.9-rs;rtc-frame-channel");
     }
 }

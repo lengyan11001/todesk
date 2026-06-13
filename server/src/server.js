@@ -207,8 +207,10 @@ function publicRtcCapabilities(device) {
     webrtc: Boolean(capabilities.webrtc),
     video: Boolean(capabilities.video),
     dataChannel: Boolean(capabilities.dataChannel),
+    frameChannel: Boolean(capabilities.frameChannel),
     localNetwork: capabilities.localNetwork !== false,
     codecs: Array.isArray(capabilities.codecs) ? capabilities.codecs.slice(0, 8).map(String) : [],
+    maxFps: Number.isFinite(Number(capabilities.maxFps)) ? Math.max(0, Math.min(120, Number(capabilities.maxFps))) : 0,
     version: String(capabilities.version || "")
   };
 }
@@ -825,7 +827,8 @@ function startRtcSession(ws, msg) {
     send(ws, { type: "error", error: "screen_not_ready", device: deviceView(device), deviceId: id });
     return;
   }
-  if (!publicRtcCapabilities(device).webrtc || !publicRtcCapabilities(device).video) {
+  const rtcCapabilities = publicRtcCapabilities(device);
+  if (!rtcCapabilities.webrtc || !(rtcCapabilities.video || rtcCapabilities.frameChannel)) {
     send(ws, { type: "error", error: "rtc_not_supported", device: deviceView(device), deviceId: id });
     return;
   }

@@ -1264,7 +1264,7 @@ canvas {
   inset: 0;
 }
 
-.viewer.rtc-active #screenCanvas {
+.viewer.rtc-video-active #screenCanvas {
   opacity: 0;
   z-index: 2;
 }

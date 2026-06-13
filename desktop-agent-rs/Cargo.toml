@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bytes = "1"
 directories = "6"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hostname = "0.4"
@@ -23,6 +24,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 url = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webrtc = "0.8"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Foundation",

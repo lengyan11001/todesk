@@ -10,6 +10,7 @@ mod input;
 mod installer;
 mod log;
 mod protocol;
+mod rtc;
 mod secure;
 mod update;
 
@@ -20,7 +21,8 @@ use capture::CaptureState;
 use config::AgentConfig;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, RtcState, RtcStop, ServerEvent};
+use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, ServerEvent};
+use rtc::{RtcManager, RtcOutbound};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -175,7 +177,9 @@ async fn run_once(config: AgentConfig) -> Result<()> {
 
     let (mut writer, mut reader) = ws.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<OutboundEvent>();
+    let (rtc_tx, mut rtc_rx) = mpsc::unbounded_channel::<RtcOutbound>();
     let capture = Arc::new(Mutex::new(CaptureState::new()));
+    let rtc_manager = RtcManager::new(config.device_id.clone(), capture.clone(), rtc_tx);
     let fast_until = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     out_tx.send(OutboundEvent::Json(ClientEvent::HelloDevice(DeviceStatus::from_config(&config, AGENT_VERSION, &capture.lock()))))?;
@@ -194,6 +198,19 @@ async fn run_once(config: AgentConfig) -> Result<()> {
             }
         }
         anyhow::Ok(())
+    });
+
+    let rtc_out_tx = out_tx.clone();
+    tokio::spawn(async move {
+        while let Some(event) = rtc_rx.recv().await {
+            match event {
+                RtcOutbound::Json(event) => {
+                    if rtc_out_tx.send(OutboundEvent::Json(event)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
     });
 
     let heartbeat_tx = out_tx.clone();
@@ -280,32 +297,32 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                     let _ = status_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(status)));
                 });
             }
-            ServerEvent::RtcRequest { session_id, .. } => {
-                log::warn(format!("rtc-request rejected session={} reason=native_webrtc_pending", session_id));
-                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcState(RtcState::failed(
-                    &config.device_id,
-                    &session_id,
-                    "native_webrtc_pending",
-                ))));
-                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcStop(RtcStop::new(
-                    &config.device_id,
-                    &session_id,
-                    "native_webrtc_pending",
-                ))));
+            ServerEvent::RtcRequest { session_id, ice_servers, .. } => {
+                log::info(format!("rtc-request received session={session_id}"));
+                let manager = rtc_manager.clone();
+                tokio::spawn(async move {
+                    manager.start_session(session_id, ice_servers).await;
+                });
             }
-            ServerEvent::RtcOffer { session_id, .. } => {
-                log::warn(format!("rtc-offer ignored session={} reason=native_webrtc_pending", session_id));
-                let _ = out_tx.send(OutboundEvent::Json(ClientEvent::RtcState(RtcState::failed(
-                    &config.device_id,
-                    &session_id,
-                    "native_webrtc_pending",
-                ))));
+            ServerEvent::RtcOffer { session_id, sdp, .. } => {
+                log::info(format!("rtc-offer received session={session_id}"));
+                let manager = rtc_manager.clone();
+                tokio::spawn(async move {
+                    manager.handle_offer(session_id, sdp.unwrap_or_default()).await;
+                });
             }
-            ServerEvent::RtcIceCandidate { session_id, .. } => {
-                log::info(format!("rtc-ice-candidate ignored session={} reason=native_webrtc_pending", session_id));
+            ServerEvent::RtcIceCandidate { session_id, candidate, .. } => {
+                let manager = rtc_manager.clone();
+                tokio::spawn(async move {
+                    manager.handle_candidate(session_id, candidate).await;
+                });
             }
             ServerEvent::RtcStopped { session_id, .. } => {
                 log::info(format!("rtc-stopped received session={}", session_id));
+                let manager = rtc_manager.clone();
+                tokio::spawn(async move {
+                    manager.close_session(&session_id).await;
+                });
             }
             ServerEvent::Other => {}
         }

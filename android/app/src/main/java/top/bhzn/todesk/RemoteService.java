@@ -32,7 +32,7 @@ import java.util.Locale;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-public class RemoteService extends Service {
+public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     static final String ACTION_START = "top.bhzn.todesk.START";
     static final String ACTION_STOP = "top.bhzn.todesk.STOP";
     static final String ACTION_STATUS = "top.bhzn.todesk.STATUS";
@@ -65,6 +65,8 @@ public class RemoteService extends Service {
     private int screenDpi;
     private long lastFrameAt;
     private long reconnectDelayMs = RECONNECT_MIN_MS;
+    private AndroidRtcManager rtcManager;
+    private Bitmap latestFrame;
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
@@ -93,6 +95,7 @@ public class RemoteService extends Service {
         captureThread = new HandlerThread("bhzn-capture");
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
+        rtcManager = new AndroidRtcManager(this, this);
     }
 
     @Override
@@ -127,6 +130,9 @@ public class RemoteService extends Service {
         running = false;
         mediaReady = false;
         closeProjection();
+        if (rtcManager != null) {
+            rtcManager.closeAll();
+        }
         if (webSocket != null) {
             webSocket.close();
         }
@@ -219,6 +225,12 @@ public class RemoteService extends Service {
             imageReader.close();
             imageReader = null;
         }
+        synchronized (this) {
+            if (latestFrame != null) {
+                latestFrame.recycle();
+                latestFrame = null;
+            }
+        }
     }
 
     private void captureFrame(ImageReader reader) {
@@ -241,6 +253,7 @@ public class RemoteService extends Service {
             bitmap.copyPixelsFromBuffer(buffer);
             Bitmap cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight);
             bitmap.recycle();
+            updateLatestFrame(cropped);
             sendFrame(cropped);
             cropped.recycle();
         } catch (Exception e) {
@@ -263,6 +276,15 @@ public class RemoteService extends Service {
         JsonUtil.put(msg, "height", screenHeight);
         JsonUtil.put(msg, "timestamp", System.currentTimeMillis());
         socket.send(msg.toString());
+    }
+
+    private void updateLatestFrame(Bitmap bitmap) {
+        synchronized (this) {
+            if (latestFrame != null) {
+                latestFrame.recycle();
+            }
+            latestFrame = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+        }
     }
 
     private void connect() {
@@ -405,13 +427,15 @@ public class RemoteService extends Service {
 
     private JSONObject rtcCapabilities() {
         JSONObject value = JsonUtil.object();
-        JsonUtil.put(value, "webrtc", false);
+        boolean available = rtcManager != null && rtcManager.isAvailable();
+        JsonUtil.put(value, "webrtc", available);
         JsonUtil.put(value, "video", false);
-        JsonUtil.put(value, "dataChannel", false);
+        JsonUtil.put(value, "dataChannel", available);
+        JsonUtil.put(value, "frameChannel", available);
         JsonUtil.put(value, "localNetwork", true);
         JsonUtil.put(value, "codecs", new JSONArray());
-        JsonUtil.put(value, "maxFps", 0);
-        JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + ";native-webrtc-pending");
+        JsonUtil.put(value, "maxFps", available ? 15 : 0);
+        JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + (available ? ";rtc-frame-channel" : ";native-webrtc-missing"));
         return value;
     }
 
@@ -463,17 +487,23 @@ public class RemoteService extends Service {
             handleFileTransfer(msg);
         } else if ("rtc-request".equals(type)) {
             String sessionId = msg.optString("sessionId");
-            Log.w(TAG, "rtc-request rejected: session=" + sessionId + ", reason=native_webrtc_pending");
-            sendRtcState(sessionId, "failed", "native_webrtc_pending");
-            sendRtcStop(sessionId, "native_webrtc_pending");
+            if (rtcManager != null) {
+                rtcManager.startSession(sessionId, msg.optJSONArray("iceServers"));
+            }
         } else if ("rtc-offer".equals(type)) {
             String sessionId = msg.optString("sessionId");
-            Log.w(TAG, "rtc-offer ignored: session=" + sessionId + ", reason=native_webrtc_pending");
-            sendRtcState(sessionId, "failed", "native_webrtc_pending");
+            if (rtcManager != null) {
+                rtcManager.handleOffer(sessionId, msg.optString("sdp"));
+            }
         } else if ("rtc-ice-candidate".equals(type)) {
-            Log.i(TAG, "rtc-ice-candidate ignored: session=" + msg.optString("sessionId"));
+            if (rtcManager != null) {
+                rtcManager.handleCandidate(msg.optString("sessionId"), msg.optJSONObject("candidate"));
+            }
         } else if ("rtc-stopped".equals(type)) {
             Log.i(TAG, "rtc-stopped received: session=" + msg.optString("sessionId"));
+            if (rtcManager != null) {
+                rtcManager.closeSession(msg.optString("sessionId"), msg.optString("reason", "peer_stopped"), false);
+            }
         }
     }
 
@@ -547,6 +577,70 @@ public class RemoteService extends Service {
         if (socket != null) {
             socket.send(msg.toString());
         }
+    }
+
+    @Override
+    public void sendRtcJson(JSONObject message) {
+        SimpleWebSocket socket = webSocket;
+        if (socket != null && message != null) {
+            socket.send(message.toString());
+        }
+    }
+
+    @Override
+    public void onRtcInput(JSONObject msg, AndroidRtcManager.RtcInputResult callback) {
+        String action = msg.optString("action");
+        boolean ok = RemoteInputService.dispatchRemoteInput(
+                action,
+                scaleInputX(msg, "x"),
+                scaleInputY(msg, "y"),
+                scaleInputX(msg, "x2"),
+                scaleInputY(msg, "y2"),
+                msg.optLong("duration", 80),
+                msg.optString("key"),
+                msg.optString("code"),
+                msg.optString("text")
+        );
+        if (!ok) {
+            Log.w(TAG, "rtc remote input failed: action=" + action
+                    + ", accessibility=" + PermissionState.isAccessibilityEnabled(this)
+                    + ", inputReady=" + PermissionState.isInputControlReady(this));
+            sendStatus();
+        }
+        if (callback != null) {
+            callback.complete(ok, ok ? "" : (PermissionState.isInputControlReady(this) ? "dispatch_failed" : "input_service_not_ready"));
+        }
+    }
+
+    @Override
+    public synchronized Bitmap captureRtcBitmap() {
+        if (latestFrame == null || latestFrame.isRecycled()) return null;
+        return latestFrame.copy(Bitmap.Config.ARGB_8888, false);
+    }
+
+    @Override
+    public String deviceId() {
+        return AppPrefs.deviceId(this);
+    }
+
+    @Override
+    public int screenWidth() {
+        return screenWidth;
+    }
+
+    @Override
+    public int screenHeight() {
+        return screenHeight;
+    }
+
+    @Override
+    public int inputWidth() {
+        return inputWidth;
+    }
+
+    @Override
+    public int inputHeight() {
+        return inputHeight;
     }
 
     private Notification notification(String text) {
