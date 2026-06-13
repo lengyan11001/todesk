@@ -71,13 +71,20 @@ MAX_IN_FLIGHT_FRAMES = 2
 FRAME_BACKPRESSURE_GRACE = 1.25
 FRAME_BACKPRESSURE_PAUSE = 0.75
 try:
-    RTC_TARGET_FPS = max(1, min(30, int(os.environ.get("BHZN_RTC_FPS", "12"))))
+    RTC_TARGET_FPS = max(1, min(30, int(os.environ.get("BHZN_RTC_FPS", "18"))))
 except Exception:
-    RTC_TARGET_FPS = 12
+    RTC_TARGET_FPS = 18
 RTC_FRAME_TIME_BASE = Fraction(1, 90000)
 APPLICATION_SERVICES = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
 BINARY_FRAME_MAGIC = b"BHZF1"
 BINARY_FRAME_HEADER_LIMIT = 64 * 1024
+RTC_QUALITY_PROFILES = {
+    "data": {"profile": "data", "maxSide": 1280, "fps": 10, "jpegQuality": 42, "bitrateKbps": 1200},
+    "balanced": {"profile": "balanced", "maxSide": 1920, "fps": 18, "jpegQuality": 58, "bitrateKbps": 3000},
+    "hd": {"profile": "hd", "maxSide": 2560, "fps": 24, "jpegQuality": 66, "bitrateKbps": 6000},
+    "lan": {"profile": "lan", "maxSide": 3840, "fps": 30, "jpegQuality": 74, "bitrateKbps": 12000},
+    "relay": {"profile": "relay", "maxSide": 1280, "fps": 10, "jpegQuality": 45, "bitrateKbps": 1200},
+}
 
 
 def reveal_text(values, key: int) -> str:
@@ -292,13 +299,42 @@ def is_allowed_file_url(url: str) -> bool:
     return False
 
 
+def normalize_quality_profile(value) -> dict:
+    if isinstance(value, dict):
+        name = str(value.get("profile") or value.get("name") or "balanced").lower()
+    else:
+        name = str(value or "balanced").lower()
+    profile = dict(RTC_QUALITY_PROFILES.get(name) or RTC_QUALITY_PROFILES["balanced"])
+    if isinstance(value, dict):
+        try:
+            profile["maxSide"] = max(640, min(3840, int(value.get("maxSide") or profile["maxSide"])))
+        except Exception:
+            pass
+        try:
+            profile["fps"] = max(1, min(30, int(value.get("fps") or profile["fps"])))
+        except Exception:
+            pass
+        try:
+            profile["jpegQuality"] = max(25, min(82, int(value.get("jpegQuality") or profile["jpegQuality"])))
+        except Exception:
+            pass
+        try:
+            profile["bitrateKbps"] = max(300, min(16000, int(value.get("bitrateKbps") or profile["bitrateKbps"])))
+        except Exception:
+            pass
+    profile["profile"] = str(profile.get("profile") or name)
+    return profile
+
+
 class DesktopVideoTrack(VideoStreamTrack):
-    def __init__(self, agent):
+    def __init__(self, agent, quality=None):
         super().__init__()
         self.agent = agent
+        self.quality = normalize_quality_profile(quality or {})
         self.frame_index = 0
-        self.frame_interval = 1.0 / RTC_TARGET_FPS
-        self.frame_duration = max(1, int(90000 / RTC_TARGET_FPS))
+        self.target_fps = max(1, min(30, int(self.quality.get("fps") or RTC_TARGET_FPS)))
+        self.frame_interval = 1.0 / self.target_fps
+        self.frame_duration = max(1, int(90000 / self.target_fps))
         self.next_frame_at = time.monotonic()
 
     async def recv(self):
@@ -309,7 +345,7 @@ class DesktopVideoTrack(VideoStreamTrack):
             self.next_frame_at = now
         self.next_frame_at += self.frame_interval
 
-        image = self.agent.capture_image_for_rtc()
+        image = self.agent.capture_image_for_rtc(self.quality)
         array = np.asarray(image.convert("RGB"))
         frame = VideoFrame.from_ndarray(array, format="rgb24")
         frame.pts = self.frame_index * self.frame_duration
@@ -333,6 +369,7 @@ class DesktopAgent:
         self.input_queue: queue.Queue[dict] = queue.Queue(maxsize=512)
         self.capture_thread = None
         self.capture_requested = False
+        self.relay_quality = normalize_quality_profile("relay")
         self.control_sessions: set[str] = set()
         self.frame_id = 0
         self.frame_lock = threading.Lock()
@@ -581,17 +618,24 @@ class DesktopAgent:
             self.mark_rtc_capture_inactive(session_id)
             self.send_rtc_state(session_id, "failed", error=str(exc))
 
-    def send_rtc_state(self, session_id: str, state: str, candidate_type: str = "unknown", error: str = ""):
-        self.send_json(
-            {
-                "type": "rtc-state",
-                "sessionId": session_id,
-                "deviceId": self.config.device_id,
-                "state": state,
-                "selectedCandidateType": candidate_type,
-                "error": str(error or "")[:400],
-            }
-        )
+    def send_rtc_state(self, session_id: str, state: str, candidate_type: str = "unknown", error: str = "", stats=None):
+        payload = {
+            "type": "rtc-state",
+            "sessionId": session_id,
+            "deviceId": self.config.device_id,
+            "state": state,
+            "selectedCandidateType": candidate_type,
+            "error": str(error or "")[:400],
+        }
+        if stats:
+            payload.update({
+                "rttMs": int(max(0, stats.get("rttMs", 0))),
+                "bitrateKbps": int(max(0, stats.get("bitrateKbps", 0))),
+                "bytesSent": int(max(0, stats.get("bytesSent", 0))),
+                "bytesReceived": int(max(0, stats.get("bytesReceived", 0))),
+                "packetsLost": int(max(0, stats.get("packetsLost", 0))),
+            })
+        self.send_json(payload)
 
     async def start_rtc_session(self, msg: dict):
         session_id = str(msg.get("sessionId") or "")
@@ -599,6 +643,7 @@ class DesktopAgent:
             return
         await self.close_rtc_session_async(session_id)
         self.suppress_relay_capture_for_rtc(session_id)
+        quality = normalize_quality_profile(msg.get("quality") or msg.get("qualityProfile") or {})
         ice_servers = []
         for item in msg.get("iceServers") or []:
             urls = item.get("urls") or []
@@ -614,7 +659,7 @@ class DesktopAgent:
                 )
             )
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
-        track = DesktopVideoTrack(self)
+        track = DesktopVideoTrack(self, quality)
         pc.addTrack(track)
 
         @pc.on("icecandidate")
@@ -637,7 +682,13 @@ class DesktopAgent:
         @pc.on("connectionstatechange")
         async def on_connectionstatechange():
             state = pc.connectionState
-            self.send_rtc_state(session_id, state, candidate_type=await self.selected_candidate_type(pc))
+            stats = await self.rtc_connection_stats(pc)
+            self.send_rtc_state(session_id, state, candidate_type=str(stats.get("candidateType") or "unknown"), stats=stats)
+            if state == "connected":
+                with self.rtc_lock:
+                    session = self.rtc_sessions.get(session_id)
+                    if session and not session.get("statsTask"):
+                        session["statsTask"] = asyncio.create_task(self.rtc_stats_loop(session_id, pc))
             if state in {"failed", "closed"}:
                 await self.close_rtc_session_async(session_id)
 
@@ -649,8 +700,9 @@ class DesktopAgent:
                     self.handle_rtc_control_message(session_id, channel, message)
 
         with self.rtc_lock:
-            self.rtc_sessions[session_id] = {"pc": pc, "track": track}
+            self.rtc_sessions[session_id] = {"pc": pc, "track": track, "quality": quality, "statsTask": None}
             self.rtc_capture_sessions.add(session_id)
+        print(f"[agent] rtc quality session={session_id} profile={quality.get('profile')} fps={quality.get('fps')} maxSide={quality.get('maxSide')}", flush=True)
         self.send_rtc_state(session_id, "checking")
 
     async def handle_rtc_signal_async(self, msg: dict):
@@ -751,6 +803,9 @@ class DesktopAgent:
             self.rtc_capture_sessions.discard(session_id)
         if not session:
             return
+        task = session.get("statsTask")
+        if task:
+            task.cancel()
         pc = session.get("pc")
         if pc:
             await pc.close()
@@ -773,20 +828,56 @@ class DesktopAgent:
         self.reset_frame_backpressure()
         self.stop_macos_capture_bridge()
 
-    async def selected_candidate_type(self, pc) -> str:
+    async def rtc_connection_stats(self, pc) -> dict:
+        result = {
+            "candidateType": "unknown",
+            "rttMs": 0,
+            "bitrateKbps": 0,
+            "bytesSent": 0,
+            "bytesReceived": 0,
+            "packetsLost": 0,
+        }
         try:
             stats = await pc.getStats()
             for report in stats.values():
-                if getattr(report, "type", "") != "candidate-pair" or not getattr(report, "selected", False):
-                    continue
-                remote_id = getattr(report, "remoteCandidateId", "")
-                local_id = getattr(report, "localCandidateId", "")
-                candidate = stats.get(local_id) or stats.get(remote_id)
-                candidate_type = getattr(candidate, "candidateType", "") if candidate else ""
-                return candidate_type or "unknown"
+                report_type = getattr(report, "type", "")
+                if report_type == "candidate-pair" and (getattr(report, "selected", False) or getattr(report, "state", "") == "succeeded"):
+                    local_id = getattr(report, "localCandidateId", "")
+                    candidate = stats.get(local_id)
+                    candidate_type = getattr(candidate, "candidateType", "") if candidate else ""
+                    result["candidateType"] = candidate_type or result["candidateType"]
+                    result["rttMs"] = int(max(0, float(getattr(report, "currentRoundTripTime", 0) or 0) * 1000))
+                    result["bytesSent"] = max(result["bytesSent"], int(getattr(report, "bytesSent", 0) or 0))
+                    result["bytesReceived"] = max(result["bytesReceived"], int(getattr(report, "bytesReceived", 0) or 0))
+                elif report_type == "outbound-rtp" and getattr(report, "kind", "") == "video":
+                    result["bytesSent"] += int(getattr(report, "bytesSent", 0) or 0)
+                    result["packetsLost"] += int(getattr(report, "packetsLost", 0) or 0)
         except Exception:
             pass
-        return "unknown"
+        return result
+
+    async def rtc_stats_loop(self, session_id: str, pc):
+        previous_bytes = 0
+        previous_at = time.monotonic()
+        while True:
+            await asyncio.sleep(2.0)
+            with self.rtc_lock:
+                if session_id not in self.rtc_sessions:
+                    return
+            stats = await self.rtc_connection_stats(pc)
+            now_value = time.monotonic()
+            bytes_sent = int(stats.get("bytesSent") or 0)
+            elapsed = max(0.001, now_value - previous_at)
+            if previous_bytes:
+                stats["bitrateKbps"] = int(max(0, (bytes_sent - previous_bytes) * 8 / elapsed / 1000))
+            previous_bytes = bytes_sent
+            previous_at = now_value
+            self.send_rtc_state(
+                session_id,
+                getattr(pc, "connectionState", "connected") or "connected",
+                candidate_type=str(stats.get("candidateType") or "unknown"),
+                stats=stats,
+            )
 
     def macos_capture_bridge_enabled(self) -> bool:
         return platform_name() == "macos" and os.environ.get("BHZN_MAC_CAPTURE_BRIDGE") == "1"
@@ -901,6 +992,7 @@ class DesktopAgent:
             self.capture_requested = False
             self.stop_macos_capture_bridge()
             return
+        self.relay_quality = normalize_quality_profile(msg.get("quality") or "relay")
         session_id = str(msg.get("sessionId") or "").strip()
         if session_id:
             self.control_sessions.add(session_id)
@@ -1195,7 +1287,8 @@ class DesktopAgent:
                 except Exception:
                     pass
 
-    def capture_image_for_rtc(self) -> Image.Image:
+    def capture_image_for_rtc(self, quality=None) -> Image.Image:
+        quality_profile = normalize_quality_profile(quality or {})
         if platform_name() == "macos" and self.quartz_capture_available():
             image, monitor = self.capture_quartz_display()
         else:
@@ -1213,12 +1306,13 @@ class DesktopAgent:
             "x": int(monitor.get("left", 0)),
             "y": int(monitor.get("top", 0)),
         }
-        image = self.resize_for_wire(image, MAX_SIDE)
+        image = self.resize_for_wire(image, int(quality_profile.get("maxSide") or MAX_SIDE))
         self.screen["width"], self.screen["height"] = image.size
         self.capture_enabled = True
         return image
 
     def send_frame(self, image: Image.Image, monitor: dict, fast_frame: bool):
+        quality = getattr(self, "relay_quality", normalize_quality_profile("relay"))
         self.screen = {
             "width": 0,
             "height": 0,
@@ -1229,9 +1323,9 @@ class DesktopAgent:
             "x": int(monitor.get("left", 0)),
             "y": int(monitor.get("top", 0)),
         }
-        image = self.resize_for_wire(image, DRAG_MAX_SIDE if fast_frame else MAX_SIDE)
+        image = self.resize_for_wire(image, DRAG_MAX_SIDE if fast_frame else int(quality.get("maxSide") or MAX_SIDE))
         self.screen["width"], self.screen["height"] = image.size
-        encoded = self.encode_jpeg(image, DRAG_JPEG_QUALITY if fast_frame else JPEG_QUALITY)
+        encoded = self.encode_jpeg(image, DRAG_JPEG_QUALITY if fast_frame else int(quality.get("jpegQuality") or JPEG_QUALITY))
         self.capture_enabled = True
         frame_id = self.next_frame_id()
         if self.send_json(

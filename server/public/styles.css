@@ -1223,14 +1223,26 @@ body.wall-resizing {
 }
 
 .screen-actions {
-  width: 132px;
+  width: 172px;
   display: grid;
   gap: 8px;
   align-self: center;
 }
 
-.screen-actions button {
+.screen-actions button,
+.screen-actions select {
   width: 100%;
+}
+
+.screen-actions select {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
 }
 
 .screen-actions #backBtn,
@@ -1349,6 +1361,10 @@ canvas {
   padding: 16px;
 }
 
+.cms-panel-wide {
+  grid-column: 1 / -1;
+}
+
 .panel-title {
   font-weight: 700;
   margin-bottom: 12px;
@@ -1383,6 +1399,35 @@ canvas {
 .row-actions {
   display: flex;
   gap: 8px;
+}
+
+.link-row {
+  align-items: flex-start;
+}
+
+.link-fields {
+  min-width: min(520px, 100%);
+  display: grid;
+  gap: 5px;
+  justify-items: end;
+  text-align: right;
+}
+
+.link-fields b,
+.link-fields span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.badge.good {
+  color: #126339;
+  background: #ddf7e8;
+}
+
+.badge.danger {
+  color: #8e2a2a;
+  background: #ffe2e2;
 }
 
 .danger-small {

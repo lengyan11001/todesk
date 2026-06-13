@@ -24,7 +24,7 @@ class FakeAgent:
         self.input_events = []
         self.control_enabled = True
 
-    def capture_image_for_rtc(self):
+    def capture_image_for_rtc(self, quality=None):
         self.frames += 1
         color = (self.frames % 255, 80, 120)
         return Image.new("RGB", (160, 90), color)

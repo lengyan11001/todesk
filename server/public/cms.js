@@ -7,8 +7,10 @@ const adminLogoutBtn = document.getElementById("adminLogoutBtn");
 const cmsContent = document.getElementById("cmsContent");
 const userTable = document.getElementById("userTable");
 const bindingTable = document.getElementById("bindingTable");
+const linkTable = document.getElementById("linkTable");
 
 let adminToken = localStorage.getItem("bhzn_admin_session") || "";
+let cmsRefreshTimer = 0;
 
 function statusText(status) {
   if (status === "approved") return "已通过";
@@ -46,6 +48,7 @@ function setLoggedIn(admin) {
 
 function setLoggedOut(message = "请登录管理员账号") {
   adminToken = "";
+  clearTimeout(cmsRefreshTimer);
   localStorage.removeItem("bhzn_admin_session");
   cmsContent.classList.add("hidden");
   adminUsernameInput.classList.remove("hidden");
@@ -54,6 +57,7 @@ function setLoggedOut(message = "请登录管理员账号") {
   adminLogoutBtn.classList.add("hidden");
   userTable.innerHTML = "";
   bindingTable.innerHTML = "";
+  if (linkTable) linkTable.innerHTML = "";
   cmsState.textContent = message;
 }
 
@@ -106,6 +110,63 @@ function renderBindings(bindings) {
   }
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function pathText(path) {
+  if (path === "rtc-lan") return "局域网直连";
+  if (path === "rtc-p2p") return "公网 P2P";
+  if (path === "rtc-turn") return "TURN UDP";
+  if (path === "ws-relay") return "WebSocket 中转";
+  if (path === "rtc") return "WebRTC 连接中";
+  if (path === "online") return "在线待命";
+  return "离线";
+}
+
+function pathClass(path) {
+  if (path === "rtc-lan" || path === "rtc-p2p") return "good";
+  if (path === "rtc-turn") return "warn";
+  if (path === "ws-relay") return "danger";
+  return "";
+}
+
+function renderLinks(links) {
+  if (!linkTable) return;
+  if (!links.length) {
+    linkTable.innerHTML = `<div class="placeholder-card">暂无设备链路数据</div>`;
+    return;
+  }
+  linkTable.innerHTML = "";
+  for (const item of links) {
+    const link = item.link || {};
+    const rtc = (link.activeRtcSessions || [])[0];
+    const relay = (link.activeRelaySessions || [])[0];
+    const quality = rtc?.quality || relay?.quality || {};
+    const row = document.createElement("div");
+    row.className = "table-row link-row";
+    row.innerHTML = `
+      <div>
+        <strong>${item.deviceId}</strong>
+        <span>${item.online ? "在线" : "离线"} · ${item.label || item.name || item.platform || "-"} · ${item.agentVersion || "Agent -"}</span>
+        <span>owner: ${(item.owners || []).map((owner) => owner.username).join(", ") || "-"}</span>
+      </div>
+      <div class="link-fields">
+        <i class="badge ${pathClass(link.activePath)}">${pathText(link.activePath)}</i>
+        <b>${quality.profile || "-"} · ${quality.maxSide || "-"}px · ${quality.fps || "-"}fps</b>
+        <span>relay: ${formatBytes(link.bytesFromDevice)} / ${formatBytes(link.bytesToControllers)}</span>
+        <span>rtc: ${formatBytes(link.rtcBytesSent)} / ${formatBytes(link.rtcBytesReceived)} · ${Math.round(link.rtcBitrateKbps || 0)} kbps · ${Math.round(link.rtcRttMs || 0)} ms</span>
+        <span>会话: RTC ${(link.activeRtcSessions || []).length} · 中转 ${(link.activeRelaySessions || []).length}${relay?.ttlSeconds ? ` · 中转剩余 ${Math.ceil(relay.ttlSeconds / 60)} 分钟` : ""}</span>
+      </div>
+    `;
+    linkTable.appendChild(row);
+  }
+}
+
 async function loadCms() {
   if (!adminToken) {
     setLoggedOut();
@@ -113,14 +174,18 @@ async function loadCms() {
   }
   cmsState.textContent = "正在加载";
   try {
-    const [me, users, bindings] = await Promise.all([
+    const [me, users, bindings, links] = await Promise.all([
       adminApi("/api/admin/me"),
       adminApi("/api/admin/users"),
-      adminApi("/api/admin/bindings")
+      adminApi("/api/admin/bindings"),
+      adminApi("/api/admin/device-links")
     ]);
     setLoggedIn(me.admin);
     renderUsers(users.users || []);
     renderBindings(bindings.bindings || []);
+    renderLinks(links.links || []);
+    clearTimeout(cmsRefreshTimer);
+    cmsRefreshTimer = setTimeout(loadCms, 5000);
   } catch {
     setLoggedOut("管理员登录已失效，请重新登录");
   }

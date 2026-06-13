@@ -127,6 +127,7 @@ async function main() {
     const ready = await waitFor(controller, (msg) => msg.type === "rtc-ready", "rtc-ready");
     const rtcRequest = await waitFor(device, (msg) => msg.type === "rtc-request", "rtc-request");
     if (ready.sessionId !== rtcRequest.sessionId) throw new Error("session id mismatch");
+    if (rtcRequest.quality?.profile !== "balanced") throw new Error("missing default rtc quality");
     if (!Array.isArray(ready.iceServers) || ready.iceServers.length < 2) throw new Error("missing ice servers");
     const turn = ready.iceServers.find((item) => String([].concat(item.urls || []).join(",")).includes("turn:"));
     if (!turn?.username || !turn?.credential) throw new Error("missing turn credential");
@@ -145,6 +146,21 @@ async function main() {
 
     send(controller, { type: "rtc-stop", sessionId: ready.sessionId, deviceId: "RTC-1001", reason: "test_done" });
     await waitFor(device, (msg) => msg.type === "rtc-stopped" && msg.reason === "test_done", "rtc stopped");
+
+    device.messages.length = 0;
+    controller.messages.length = 0;
+    send(controller, { type: "control", deviceId: "RTC-1001" });
+    const rejected = await waitFor(controller, (msg) => msg.type === "error" && msg.error === "rtc_required", "rtc required");
+    if (rejected.deviceId !== "RTC-1001") throw new Error("bad rtc_required device");
+    send(controller, { type: "control", deviceId: "RTC-1001", relayFallback: true, reason: "rtc_timeout" });
+    const relayReady = await waitFor(controller, (msg) => msg.type === "control-ready", "relay control-ready");
+    const relayRequest = await waitFor(device, (msg) => msg.type === "control-request", "relay control-request");
+    if (relayReady.path !== "ws-relay") throw new Error("relay path not marked");
+    if (relayReady.quality?.profile !== "relay") throw new Error("relay quality not enforced");
+    if (!relayReady.ttlSeconds || relayReady.ttlSeconds > 600) throw new Error("relay ttl missing");
+    if (relayRequest.quality?.profile !== "relay") throw new Error("device relay quality missing");
+    send(controller, { type: "stop-control", sessionId: relayReady.sessionId });
+    await waitFor(device, (msg) => msg.type === "stop-control" && msg.sessionId === relayReady.sessionId, "relay stopped");
 
     device.close();
     controller.close();

@@ -31,12 +31,20 @@ const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 10
 const FILE_TRANSFER_TTL_MS = Number(process.env.FILE_TRANSFER_TTL_MS || 24 * 60 * 60 * 1000);
 const FILE_TRANSFER_DIR = path.join(DATA_DIR, "file-transfers");
 const RTC_SESSION_TTL_MS = Number(process.env.RTC_SESSION_TTL_MS || 60 * 60 * 1000);
+const RELAY_SESSION_TTL_MS = Math.max(60_000, Number(process.env.RELAY_SESSION_TTL_MS || 10 * 60 * 1000));
 const RTC_STUN_URLS = splitEnvList(process.env.RTC_STUN_URLS || "stun:stun.cloudflare.com:3478");
 const RTC_TURN_URLS = splitEnvList(process.env.RTC_TURN_URLS || "");
 const RTC_TURN_SECRET = process.env.RTC_TURN_SECRET || "";
 const RTC_TURN_USERNAME = process.env.RTC_TURN_USERNAME || "";
 const RTC_TURN_CREDENTIAL = process.env.RTC_TURN_CREDENTIAL || "";
 const RTC_TURN_TTL_SECONDS = Math.max(60, Number(process.env.RTC_TURN_TTL_SECONDS || 3600));
+const RELAY_QUALITY_PROFILE = Object.freeze({
+  profile: "relay",
+  maxSide: 1280,
+  fps: 10,
+  jpegQuality: 45,
+  bitrateKbps: 1200
+});
 
 process.on("uncaughtException", (error) => {
   const code = error?.code || "";
@@ -139,7 +147,15 @@ function trafficStatsFor(deviceId) {
       bytesToControllers: 0,
       lastFrameBytesFromDevice: 0,
       lastFrameBytesToControllers: 0,
-      lastControllerCount: 0
+      lastControllerCount: 0,
+      rtcBytesSent: 0,
+      rtcBytesReceived: 0,
+      rtcBitrateKbps: 0,
+      rtcRttMs: 0,
+      rtcPacketsLost: 0,
+      lastRtcCandidateType: "",
+      lastRtcState: "",
+      lastRtcUpdatedAt: ""
     };
     trafficStats.set(id, stats);
   }
@@ -170,7 +186,15 @@ function resetTrafficStats(deviceId) {
     bytesToControllers: 0,
     lastFrameBytesFromDevice: 0,
     lastFrameBytesToControllers: 0,
-    lastControllerCount: 0
+    lastControllerCount: 0,
+    rtcBytesSent: 0,
+    rtcBytesReceived: 0,
+    rtcBitrateKbps: 0,
+    rtcRttMs: 0,
+    rtcPacketsLost: 0,
+    lastRtcCandidateType: "",
+    lastRtcState: "",
+    lastRtcUpdatedAt: ""
   };
   trafficStats.set(id, stats);
   return stats;
@@ -178,10 +202,82 @@ function resetTrafficStats(deviceId) {
 
 function trafficStatsView(stats) {
   const device = devices.get(stats.deviceId);
+  const activeRtc = activeRtcSessionsForDevice(stats.deviceId);
+  const relaySessions = device ? Array.from(device.controllers).map((sessionId) => controllers.get(sessionId)).filter(Boolean) : [];
   return {
     ...stats,
     online: Boolean(device),
-    controllerCount: device ? device.controllers.size : 0
+    controllerCount: device ? device.controllers.size : 0,
+    activePath: activePathForDevice(device, stats, activeRtc, relaySessions),
+    activeRtcSessions: activeRtc.map(adminRtcSessionView),
+    activeRelaySessions: relaySessions.map(adminRelaySessionView)
+  };
+}
+
+function qualityProfileFromValue(value, fallback = "balanced") {
+  if (typeof value === "object" && value) value = value.profile || value.name || "";
+  const profile = String(value || fallback).toLowerCase();
+  if (profile === "lan") {
+    return { profile: "lan", maxSide: 3840, fps: 30, jpegQuality: 74, bitrateKbps: 12000 };
+  }
+  if (profile === "hd") {
+    return { profile: "hd", maxSide: 2560, fps: 24, jpegQuality: 66, bitrateKbps: 6000 };
+  }
+  if (profile === "data") {
+    return { profile: "data", maxSide: 1280, fps: 10, jpegQuality: 42, bitrateKbps: 1200 };
+  }
+  return { profile: "balanced", maxSide: 1920, fps: 18, jpegQuality: 58, bitrateKbps: 3000 };
+}
+
+function activeRtcSessionsForDevice(deviceId) {
+  return Array.from(rtcSessions.values()).filter((session) => session.deviceId === deviceId);
+}
+
+function activePathForDevice(device, stats, activeRtc, relaySessions) {
+  if (activeRtc.length) {
+    const selected = activeRtc.find((session) => session.selectedCandidateType && session.selectedCandidateType !== "unknown") || activeRtc[0];
+    const type = selected.selectedCandidateType || stats.lastRtcCandidateType || "unknown";
+    if (type === "host") return "rtc-lan";
+    if (type === "srflx" || type === "prflx") return "rtc-p2p";
+    if (type === "relay") return "rtc-turn";
+    return "rtc";
+  }
+  if (relaySessions.length) return "ws-relay";
+  if (device) return "online";
+  return "offline";
+}
+
+function adminRtcSessionView(session) {
+  return {
+    sessionId: session.sessionId,
+    userId: session.userId,
+    deviceId: session.deviceId,
+    mode: session.mode,
+    createdAt: iso(session.createdAt),
+    expiresAt: iso(session.expiresAt),
+    ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
+    quality: session.quality,
+    state: session.state || "",
+    selectedCandidateType: session.selectedCandidateType || "unknown",
+    rttMs: Number(session.rttMs || 0),
+    bitrateKbps: Number(session.bitrateKbps || 0),
+    bytesSent: Number(session.bytesSent || 0),
+    bytesReceived: Number(session.bytesReceived || 0),
+    packetsLost: Number(session.packetsLost || 0),
+    updatedAt: session.updatedAt ? iso(session.updatedAt) : ""
+  };
+}
+
+function adminRelaySessionView(session) {
+  return {
+    sessionId: session.sessionId,
+    userId: session.userId,
+    deviceId: session.deviceId,
+    mode: session.mode || "control",
+    createdAt: iso(session.createdAt),
+    expiresAt: iso(session.expiresAt),
+    ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
+    quality: session.quality || RELAY_QUALITY_PROFILE
   };
 }
 
@@ -254,6 +350,7 @@ function rtcSessionView(session) {
     createdAt: session.createdAt,
     expiresAt: session.expiresAt,
     ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
+    quality: session.quality,
     iceServers: session.iceServers
   };
 }
@@ -807,6 +904,19 @@ function pruneRtcSessions() {
   }
 }
 
+function pruneRelaySessions() {
+  const cutoff = now();
+  for (const [sessionId, controller] of Array.from(controllers)) {
+    if (controller.expiresAt && controller.expiresAt <= cutoff) {
+      stopControllerSession(sessionId, "relay_time_limit", {
+        notifyController: true,
+        notifyDevice: true,
+        broadcast: true
+      });
+    }
+  }
+}
+
 function rtcSessionForMessage(ws, msg) {
   const sessionId = String(msg.sessionId || "");
   const session = rtcSessions.get(sessionId);
@@ -853,6 +963,7 @@ function startRtcSession(ws, msg) {
   }
   const sessionId = makeSessionId();
   const iceServers = rtcIceServers(ws.userId, id, sessionId);
+  const quality = qualityProfileFromValue(msg.quality || msg.qualityProfile, "balanced");
   const session = {
     sessionId,
     userId: ws.userId,
@@ -862,7 +973,16 @@ function startRtcSession(ws, msg) {
     iceServers,
     createdAt: now(),
     expiresAt: now() + RTC_SESSION_TTL_MS,
-    mode: String(msg.mode || "control")
+    mode: String(msg.mode || "control"),
+    quality,
+    state: "created",
+    selectedCandidateType: "unknown",
+    rttMs: 0,
+    bitrateKbps: 0,
+    bytesSent: 0,
+    bytesReceived: 0,
+    packetsLost: 0,
+    updatedAt: now()
   };
   rtcSessions.set(sessionId, session);
   const view = rtcSessionView(session);
@@ -871,12 +991,14 @@ function startRtcSession(ws, msg) {
     type: "rtc-request",
     ...view,
     controllerId: ws.userId,
-    mode: session.mode
+    mode: session.mode,
+    quality
   });
   relayLog("rtc.ready", {
     sessionId,
     userId: ws.userId,
     deviceId: id,
+    quality: quality.profile,
     iceServerCount: iceServers.length,
     hasTurn: iceServers.some((item) => String([].concat(item.urls || []).join(",")).includes("turn:"))
   });
@@ -913,22 +1035,51 @@ function forwardRtcSignal(ws, msg) {
   }
   if (msg.type === "rtc-state") {
     const state = String(msg.state || "").slice(0, 64);
+    const selectedCandidateType = String(msg.selectedCandidateType || "unknown").slice(0, 32);
+    const rttMs = Math.max(0, Number(msg.rttMs || 0));
+    const bitrateKbps = Math.max(0, Number(msg.bitrateKbps || 0));
+    const bytesSent = Math.max(0, Number(msg.bytesSent || 0));
+    const bytesReceived = Math.max(0, Number(msg.bytesReceived || 0));
+    const packetsLost = Math.max(0, Number(msg.packetsLost || 0));
+    session.state = state;
+    session.selectedCandidateType = selectedCandidateType;
+    session.rttMs = rttMs;
+    session.bitrateKbps = bitrateKbps;
+    session.bytesSent = bytesSent;
+    session.bytesReceived = bytesReceived;
+    session.packetsLost = packetsLost;
+    session.updatedAt = now();
+    const stats = trafficStatsFor(session.deviceId);
+    stats.lastRtcState = state;
+    stats.lastRtcCandidateType = selectedCandidateType;
+    stats.rtcRttMs = rttMs;
+    stats.rtcBitrateKbps = bitrateKbps;
+    stats.rtcBytesSent = Math.max(Number(stats.rtcBytesSent || 0), bytesSent);
+    stats.rtcBytesReceived = Math.max(Number(stats.rtcBytesReceived || 0), bytesReceived);
+    stats.rtcPacketsLost = Math.max(Number(stats.rtcPacketsLost || 0), packetsLost);
+    stats.lastRtcUpdatedAt = iso();
     relayLog("rtc.state", {
       sessionId: session.sessionId,
       userId: session.userId,
       deviceId: session.deviceId,
       role: ws.role,
       state,
-      selectedCandidateType: String(msg.selectedCandidateType || "unknown").slice(0, 32),
-      rttMs: Number(msg.rttMs || 0),
-      bitrateKbps: Number(msg.bitrateKbps || 0)
+      selectedCandidateType,
+      rttMs,
+      bitrateKbps,
+      bytesSent,
+      bytesReceived,
+      packetsLost
     });
     send(target, {
       ...base,
       state,
-      selectedCandidateType: String(msg.selectedCandidateType || "unknown").slice(0, 32),
-      rttMs: Number(msg.rttMs || 0),
-      bitrateKbps: Number(msg.bitrateKbps || 0)
+      selectedCandidateType,
+      rttMs,
+      bitrateKbps,
+      bytesSent,
+      bytesReceived,
+      packetsLost
     });
     return;
   }
@@ -938,10 +1089,11 @@ function forwardRtcSignal(ws, msg) {
 }
 
 function attachController(device, ws) {
-  if (supportsRtcRelayBypass(device)) {
+  if (supportsRtcRelayBypass(device) && !ws.allowRtcRelayFallback) {
     send(ws, { type: "error", error: "rtc_required", device: deviceView(device), deviceId: device.id });
     return;
   }
+  ws.allowRtcRelayFallback = false;
   let replaced = 0;
   for (const existingSessionId of Array.from(ws.sessions)) {
     const existing = controllers.get(existingSessionId);
@@ -955,7 +1107,18 @@ function attachController(device, ws) {
     }
   }
   const sessionId = makeSessionId();
-  controllers.set(sessionId, { ws, userId: ws.userId, deviceId: device.id, createdAt: now() });
+  const relayQuality = { ...RELAY_QUALITY_PROFILE };
+  const expiresAt = now() + RELAY_SESSION_TTL_MS;
+  controllers.set(sessionId, {
+    sessionId,
+    ws,
+    userId: ws.userId,
+    deviceId: device.id,
+    createdAt: now(),
+    expiresAt,
+    mode: "control",
+    quality: relayQuality
+  });
   device.controllers.add(sessionId);
   ws.sessions.add(sessionId);
   relayLog("control.ready", {
@@ -963,10 +1126,25 @@ function attachController(device, ws) {
     userId: ws.userId,
     deviceId: device.id,
     replaced,
+    ttlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000),
     controllerCount: device.controllers.size
   });
-  send(ws, { type: "control-ready", sessionId, device: deviceView(device) });
-  send(device.ws, { type: "control-request", sessionId, controllerCount: device.controllers.size });
+  send(ws, {
+    type: "control-ready",
+    sessionId,
+    device: deviceView(device),
+    path: "ws-relay",
+    quality: relayQuality,
+    expiresAt,
+    ttlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000)
+  });
+  send(device.ws, {
+    type: "control-request",
+    sessionId,
+    controllerCount: device.controllers.size,
+    quality: relayQuality,
+    relayTtlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000)
+  });
   broadcastDeviceOwners(device.id);
 }
 
@@ -977,7 +1155,7 @@ function handleBinaryDeviceFrame(ws, raw) {
   }
   const device = devices.get(ws.deviceId);
   if (!device) return;
-  if (supportsRtcRelayBypass(device) || hasActiveRtcSessionForDevice(ws.deviceId)) {
+  if (hasActiveRtcSessionForDevice(ws.deviceId)) {
     device.lastSeen = now();
     return;
   }
@@ -1390,6 +1568,43 @@ app.get("/api/admin/traffic", requireAdmin, (req, res) => {
   res.json({ stats });
 });
 
+app.get("/api/admin/device-links", requireAdmin, (req, res) => {
+  const deviceIds = new Set([
+    ...state.bindings.map((binding) => binding.deviceId),
+    ...devices.keys(),
+    ...trafficStats.keys()
+  ]);
+  const links = Array.from(deviceIds)
+    .sort()
+    .map((deviceId) => {
+      const live = devices.get(deviceId);
+      const bindings = state.bindings.filter((binding) => binding.deviceId === deviceId);
+      const stats = trafficStatsView(trafficStatsFor(deviceId));
+      return {
+        deviceId,
+        name: live?.name || bindings[0]?.lastDevice?.name || "",
+        label: bindings[0]?.label || live?.name || bindings[0]?.lastDevice?.name || defaultDeviceName(live?.platform || bindings[0]?.lastDevice?.platform),
+        platform: live?.platform || bindings[0]?.lastDevice?.platform || "android",
+        agentVersion: live?.agentVersion || bindings[0]?.lastDevice?.agentVersion || "",
+        online: Boolean(live),
+        owners: bindings.map((binding) => {
+          const user = state.users.find((item) => item.id === binding.userId);
+          return {
+            userId: binding.userId,
+            username: user?.username || "unknown",
+            bindingId: binding.id,
+            monitorAlways: Boolean(binding.monitorAlways)
+          };
+        }),
+        permissions: live?.permissions || bindings[0]?.lastDevice?.permissions || {},
+        screen: live?.screen || bindings[0]?.lastDevice?.screen || null,
+        rtcCapabilities: publicRtcCapabilities(live || bindings[0]?.lastDevice || {}),
+        link: stats
+      };
+    });
+  res.json({ links, updatedAt: iso() });
+});
+
 app.post("/api/admin/traffic/:deviceId/reset", requireAdmin, (req, res) => {
   const stats = resetTrafficStats(req.params.deviceId);
   res.json({ ok: true, stats: trafficStatsView(stats) });
@@ -1521,7 +1736,7 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.type === "frame") {
-        if (supportsRtcRelayBypass(device) || hasActiveRtcSessionForDevice(ws.deviceId)) {
+        if (hasActiveRtcSessionForDevice(ws.deviceId)) {
           device.lastSeen = now();
           return;
         }
@@ -1633,6 +1848,7 @@ wss.on("connection", (ws) => {
           send(ws, { type: "error", error: "device_offline", device: bindingView(binding) });
           return;
         }
+        ws.allowRtcRelayFallback = Boolean(msg.relayFallback || msg.allowRelayFallback);
         attachController(device, ws);
         return;
       }
@@ -1793,6 +2009,7 @@ setInterval(() => {
   }
   pruneFileTransfers();
   pruneRtcSessions();
+  pruneRelaySessions();
 }, WS_PING_INTERVAL_MS).unref();
 
 server.listen(PORT, HOST, () => {
