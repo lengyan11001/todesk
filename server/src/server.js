@@ -23,6 +23,8 @@ const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026
 const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.8-rs";
 const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
 const MAC_AGENT_VERSION = process.env.MAC_AGENT_VERSION || "0.1.21";
+const MAC_AGENT_ARM64_VERSION = process.env.MAC_AGENT_ARM64_VERSION || MAC_AGENT_VERSION;
+const MAC_AGENT_X86_64_VERSION = process.env.MAC_AGENT_X86_64_VERSION || "0.1.19";
 const MAC_AGENT_ARM64_FILE = process.env.MAC_AGENT_ARM64_FILE || "BHZN-ToDesk-Agent-mac-arm64.zip";
 const MAC_AGENT_X86_64_FILE = process.env.MAC_AGENT_X86_64_FILE || "BHZN-ToDesk-Agent-mac-x86_64.zip";
 const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 100 * 1024 * 1024);
@@ -1057,14 +1059,14 @@ function releaseFileView(req, platform, arch, version, fileName) {
 
 app.get("/api/releases/macos-agent", (req, res) => {
   const releases = [
-    releaseFileView(req, "macos", "arm64", MAC_AGENT_VERSION, MAC_AGENT_ARM64_FILE),
-    releaseFileView(req, "macos", "x86_64", MAC_AGENT_VERSION, MAC_AGENT_X86_64_FILE)
+    releaseFileView(req, "macos", "arm64", MAC_AGENT_ARM64_VERSION, MAC_AGENT_ARM64_FILE),
+    releaseFileView(req, "macos", "x86_64", MAC_AGENT_X86_64_VERSION, MAC_AGENT_X86_64_FILE)
   ].filter(Boolean);
   if (!releases.length) {
     res.status(404).json({ error: "release_not_found" });
     return;
   }
-  res.json({ platform: "macos", version: MAC_AGENT_VERSION, releases });
+  res.json({ platform: "macos", version: MAC_AGENT_ARM64_VERSION, releases });
 });
 
 app.post("/api/auth/register", (req, res) => {
