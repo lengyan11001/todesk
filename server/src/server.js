@@ -22,7 +22,7 @@ const DEFAULT_ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026";
 const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.8-rs";
 const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
-const MAC_AGENT_VERSION = process.env.MAC_AGENT_VERSION || "0.1.20";
+const MAC_AGENT_VERSION = process.env.MAC_AGENT_VERSION || "0.1.21";
 const MAC_AGENT_ARM64_FILE = process.env.MAC_AGENT_ARM64_FILE || "BHZN-ToDesk-Agent-mac-arm64.zip";
 const MAC_AGENT_X86_64_FILE = process.env.MAC_AGENT_X86_64_FILE || "BHZN-ToDesk-Agent-mac-x86_64.zip";
 const FILE_TRANSFER_MAX_BYTES = Number(process.env.FILE_TRANSFER_MAX_BYTES || 100 * 1024 * 1024);
@@ -213,6 +213,18 @@ function publicRtcCapabilities(device) {
     maxFps: Number.isFinite(Number(capabilities.maxFps)) ? Math.max(0, Math.min(120, Number(capabilities.maxFps))) : 0,
     version: String(capabilities.version || "")
   };
+}
+
+function supportsRtcRelayBypass(device) {
+  const capabilities = publicRtcCapabilities(device);
+  return Boolean(capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
+}
+
+function hasActiveRtcSessionForDevice(deviceId) {
+  for (const session of rtcSessions.values()) {
+    if (session.deviceId === deviceId) return true;
+  }
+  return false;
 }
 
 function sanitizeRtcCandidate(value) {
@@ -924,6 +936,10 @@ function forwardRtcSignal(ws, msg) {
 }
 
 function attachController(device, ws) {
+  if (supportsRtcRelayBypass(device)) {
+    send(ws, { type: "error", error: "rtc_required", device: deviceView(device), deviceId: device.id });
+    return;
+  }
   let replaced = 0;
   for (const existingSessionId of Array.from(ws.sessions)) {
     const existing = controllers.get(existingSessionId);
@@ -959,6 +975,10 @@ function handleBinaryDeviceFrame(ws, raw) {
   }
   const device = devices.get(ws.deviceId);
   if (!device) return;
+  if (supportsRtcRelayBypass(device) || hasActiveRtcSessionForDevice(ws.deviceId)) {
+    device.lastSeen = now();
+    return;
+  }
   let frame;
   try {
     frame = decodeBinaryFrame(raw);
@@ -1499,6 +1519,10 @@ wss.on("connection", (ws) => {
       }
 
       if (msg.type === "frame") {
+        if (supportsRtcRelayBypass(device) || hasActiveRtcSessionForDevice(ws.deviceId)) {
+          device.lastSeen = now();
+          return;
+        }
         if (typeof msg.image !== "string" || msg.image.length > 20_000_000) {
           console.warn("drop invalid frame", {
             deviceId: ws.deviceId,

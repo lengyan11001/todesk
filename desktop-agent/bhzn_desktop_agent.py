@@ -55,7 +55,7 @@ except Exception:
 
 
 APP_NAME = "BHZN ToDesk Desktop Agent"
-AGENT_VERSION = "0.1.20"
+AGENT_VERSION = "0.1.21"
 FRAME_INTERVAL = 0.10
 DRAG_FRAME_INTERVAL = 0.05
 HEARTBEAT_INTERVAL = 15.0
@@ -344,6 +344,7 @@ class DesktopAgent:
         self.rtc_thread = None
         self.rtc_sessions = {}
         self.rtc_lock = threading.Lock()
+        self.rtc_capture_sessions: set[str] = set()
         self.dragging = False
         self.drag_button = "left"
         self.fast_frame_until = 0.0
@@ -577,6 +578,7 @@ class DesktopAgent:
             future.result()
         except Exception as exc:
             print(f"[agent] rtc {action} failed session={session_id}: {exc}", flush=True)
+            self.mark_rtc_capture_inactive(session_id)
             self.send_rtc_state(session_id, "failed", error=str(exc))
 
     def send_rtc_state(self, session_id: str, state: str, candidate_type: str = "unknown", error: str = ""):
@@ -596,6 +598,7 @@ class DesktopAgent:
         if not session_id:
             return
         await self.close_rtc_session_async(session_id)
+        self.suppress_relay_capture_for_rtc(session_id)
         ice_servers = []
         for item in msg.get("iceServers") or []:
             urls = item.get("urls") or []
@@ -647,6 +650,7 @@ class DesktopAgent:
 
         with self.rtc_lock:
             self.rtc_sessions[session_id] = {"pc": pc, "track": track}
+            self.rtc_capture_sessions.add(session_id)
         self.send_rtc_state(session_id, "checking")
 
     async def handle_rtc_signal_async(self, msg: dict):
@@ -744,11 +748,30 @@ class DesktopAgent:
     async def close_rtc_session_async(self, session_id: str):
         with self.rtc_lock:
             session = self.rtc_sessions.pop(session_id, None)
+            self.rtc_capture_sessions.discard(session_id)
         if not session:
             return
         pc = session.get("pc")
         if pc:
             await pc.close()
+
+    def rtc_capture_active(self) -> bool:
+        with self.rtc_lock:
+            return bool(self.rtc_capture_sessions)
+
+    def mark_rtc_capture_inactive(self, session_id: str):
+        with self.rtc_lock:
+            self.rtc_capture_sessions.discard(session_id)
+
+    def suppress_relay_capture_for_rtc(self, session_id: str):
+        with self.rtc_lock:
+            self.rtc_capture_sessions.add(session_id)
+        if self.capture_requested or self.control_sessions:
+            print("[agent] stopping websocket relay capture for rtc", flush=True)
+        self.control_sessions.clear()
+        self.capture_requested = False
+        self.reset_frame_backpressure()
+        self.stop_macos_capture_bridge()
 
     async def selected_candidate_type(self, pc) -> str:
         try:
@@ -874,6 +897,10 @@ class DesktopAgent:
             return False
 
     def add_control_session(self, msg: dict):
+        if self.rtc_capture_active():
+            self.capture_requested = False
+            self.stop_macos_capture_bridge()
+            return
         session_id = str(msg.get("sessionId") or "").strip()
         if session_id:
             self.control_sessions.add(session_id)
@@ -896,6 +923,10 @@ class DesktopAgent:
         if controller_count > 0 and not self.control_sessions:
             self.control_sessions.add("__unknown__")
         if self.control_sessions or controller_count > 0:
+            if self.rtc_capture_active():
+                self.capture_requested = False
+                self.stop_macos_capture_bridge()
+                return
             self.capture_requested = True
             return
         self.capture_requested = False
@@ -941,6 +972,8 @@ class DesktopAgent:
                         self.frames_in_flight.pop(old_frame_id, None)
 
     def should_pause_for_frame_backpressure(self) -> bool:
+        if self.rtc_capture_active():
+            return True
         if not self.control_sessions:
             return True
         with self.frame_lock:
@@ -952,6 +985,10 @@ class DesktopAgent:
             return len(self.frames_in_flight) >= MAX_IN_FLIGHT_FRAMES
 
     def start_capture(self):
+        if self.rtc_capture_active():
+            self.capture_requested = False
+            self.stop_macos_capture_bridge()
+            return
         self.capture_requested = True
         if not self.screen_permission_available():
             self.capture_enabled = False
@@ -971,7 +1008,7 @@ class DesktopAgent:
     def capture_bridge_loop(self):
         bridge_started = False
         try:
-            while self.running and self.connected and self.capture_requested:
+            while self.running and self.connected and self.capture_requested and not self.rtc_capture_active():
                 if self.should_pause_for_frame_backpressure():
                     if bridge_started:
                         self.stop_macos_capture_bridge()
@@ -1049,7 +1086,7 @@ class DesktopAgent:
             self.start_capture()
 
     def send_bridge_frame(self, payload: dict):
-        if not self.control_sessions:
+        if self.rtc_capture_active() or not self.control_sessions:
             return
         image = str(payload.get("image") or "")
         width = int(payload.get("width") or 0)
@@ -1080,7 +1117,7 @@ class DesktopAgent:
             self.note_frame_sent(frame_id)
 
     def send_bridge_binary_frame(self, payload: dict, image: bytes):
-        if not self.control_sessions:
+        if self.rtc_capture_active() or not self.control_sessions:
             return
         width = int(payload.get("width") or 0)
         height = int(payload.get("height") or 0)
@@ -1120,7 +1157,7 @@ class DesktopAgent:
         try:
             if not use_quartz_capture:
                 sct = mss.mss()
-            while self.running and self.connected and self.capture_requested:
+            while self.running and self.connected and self.capture_requested and not self.rtc_capture_active():
                 if self.should_pause_for_frame_backpressure():
                     time.sleep(FRAME_BACKPRESSURE_PAUSE)
                     continue

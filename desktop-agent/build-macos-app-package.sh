@@ -7,7 +7,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.1.20"
+VERSION="0.1.21"
 MACOS_ARCH="${MACOS_ARCH:-$(uname -m)}"
 BUILD_VENV="${ROOT_DIR}/.build-venv-macos-${MACOS_ARCH}"
 BUILD_DIR="${ROOT_DIR}/build-macos-app"

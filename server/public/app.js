@@ -423,13 +423,15 @@ function openScreen() {
 
 function closeScreen(stopRemote = true) {
   const closingDeviceId = activeDeviceId;
+  const closingRtcSessionId = rtcState?.sessionId || "";
+  const closingRelaySessionId = closingRtcSessionId === sessionId ? "" : sessionId;
   closeRtc("screen_closed", stopRemote);
   if (isViewerFullscreen()) {
     document.exitFullscreen().catch(() => {});
   }
   fullscreenBtn.textContent = "全屏";
-  if (stopRemote && sessionId && ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "stop-control", sessionId }));
+  if (stopRemote && closingRelaySessionId && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop-control", sessionId: closingRelaySessionId }));
   }
   screenOpen = false;
   sessionId = "";
@@ -461,7 +463,11 @@ function resumeActiveControl() {
   if (!device?.online || !hasScreenPermission(device)) return;
   activeMeta.textContent = "连接恢复，正在重新进入设备";
   pendingControlIntents.set(activeDeviceId, "control");
-  ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+  if (supportsRtc(device)) {
+    ws.send(JSON.stringify({ type: "rtc-start", deviceId: activeDeviceId, mode: "control" }));
+  } else {
+    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+  }
 }
 
 function renderDevices() {
@@ -526,7 +532,7 @@ function monitoredDevices() {
 }
 
 function canMonitorDevice(device) {
-  return Boolean(device?.online && hasScreenPermission(device));
+  return Boolean(device?.online && hasScreenPermission(device) && !supportsRtc(device));
 }
 
 function deviceIdByMonitorSession(targetSessionId) {
@@ -1226,6 +1232,7 @@ function errorText(msg) {
   if (msg.error === "device_offline") return "设备不在线";
   if (msg.error === "device_not_bound") return "设备还没有绑定到当前账号";
   if (msg.error === "rtc_not_supported") return "设备暂不支持直连，正在使用中转";
+  if (msg.error === "rtc_required") return "该设备已启用 WebRTC，请重新打开设备";
   if (msg.error === "bad_rtc_session") return "直连会话已失效";
   if (msg.error === "bad_verification_code") return "设备验证码不正确";
   if (msg.error === "user_not_approved") return "账号还没有审核通过";
@@ -1282,19 +1289,28 @@ function closeRtc(reason = "closed", notify = true) {
 
 function fallbackToRelay(reason = "fallback") {
   const deviceId = rtcState?.deviceId || activeDeviceId;
-  const alreadyHasSession = rtcState?.sessionId || sessionId;
+  const device = devices.find((item) => item.id === deviceId);
   closeRtc(reason, true);
   if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (supportsRtc(device)) {
+    sessionId = "";
+    pendingControlIntents.delete(deviceId);
+    setInputReady(false);
+    activeMeta.textContent = "WebRTC 连接失败，请重新打开设备";
+    return;
+  }
   activeMeta.textContent = "直连未建立，正在回退中转";
   pendingControlIntents.set(deviceId, "control");
   ws.send(JSON.stringify({ type: "control", deviceId }));
-  if (alreadyHasSession) sessionId = "";
+  sessionId = "";
 }
 
 async function handleRtcReady(msg) {
   if (msg.deviceId !== activeDeviceId || !screenOpen) return;
   if (!window.RTCPeerConnection) {
-    fallbackToRelay("unsupported");
+    sessionId = "";
+    pendingControlIntents.delete(msg.deviceId);
+    activeMeta.textContent = "当前浏览器不支持 WebRTC";
     return;
   }
   closeRtc("replaced", false);
@@ -1447,6 +1463,10 @@ function handleRtcPeerState(msg) {
 function handleRtcStopped(msg) {
   if (!rtcState || rtcState.sessionId !== msg.sessionId) return;
   closeRtc(msg.reason || "peer_stopped", false);
+  if (sessionId === msg.sessionId) {
+    sessionId = "";
+    setInputReady(false);
+  }
 }
 
 function candidateTypeText(type) {
@@ -1472,7 +1492,11 @@ function startControl(id) {
   const previousSessionId = sessionId;
   const device = devices.find((item) => item.id === nextDeviceId);
   if (previousSessionId && previousDeviceId && previousDeviceId !== nextDeviceId && ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "stop-control", sessionId: previousSessionId }));
+    if (rtcState?.sessionId === previousSessionId) {
+      closeRtc("switch_device", true);
+    } else {
+      ws.send(JSON.stringify({ type: "stop-control", sessionId: previousSessionId }));
+    }
     sessionId = "";
     if (shouldKeepMonitoring(previousDeviceId)) {
       setTimeout(() => {
@@ -1537,7 +1561,8 @@ async function toggleViewerFullscreen() {
 function drawFrame(msg) {
   if (!msg.image) return;
   if (msg.frameKind && msg.frameKind !== "jpeg") return;
-  if (rtcState?.connected && msg.deviceId === activeDeviceId) return;
+  const activeDevice = devices.find((item) => item.id === activeDeviceId);
+  if (msg.deviceId === activeDeviceId && supportsRtc(activeDevice)) return;
   const timestamp = Number(msg.timestamp || 0);
   if (timestamp && timestamp < lastFrameTimestamp) return;
   const drawSerial = ++frameDrawSerial;
@@ -1643,10 +1668,11 @@ async function handleBinaryFrame(data, source = "relay") {
   }
   if (!frame?.header) return;
   const header = frame.header;
-  const skipActiveRelay = source === "relay" && rtcState?.connected && header.deviceId === activeDeviceId;
+  const relayRtcDevice = source === "relay" && supportsRtc(devices.find((item) => item.id === header.deviceId));
+  const skipActiveRelay = relayRtcDevice && header.deviceId === activeDeviceId;
   const isActiveFrame = !skipActiveRelay && header.deviceId === activeDeviceId && screenOpen;
-  const isMonitorFrame = activeStageTab === "wall" && shouldKeepMonitoring(header.deviceId);
-  const isWallControlFrame = header.deviceId === wallActiveDeviceId && isWallControlOpen();
+  const isMonitorFrame = !relayRtcDevice && activeStageTab === "wall" && shouldKeepMonitoring(header.deviceId);
+  const isWallControlFrame = !relayRtcDevice && header.deviceId === wallActiveDeviceId && isWallControlOpen();
   if (!isActiveFrame && !isMonitorFrame && !isWallControlFrame) return;
   if (header.frameKind && header.frameKind !== "jpeg") return;
   const timestamp = Number(header.timestamp || 0);
