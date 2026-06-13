@@ -43,6 +43,14 @@ env_from_pid() {
   fi
 }
 
+validate_runtime_env() {
+  if [ -e "${TURN_ENV_FILE}" ] && [ ! -r "${TURN_ENV_FILE}" ]; then
+    echo "Runtime env exists but is not readable by $(id -un): ${TURN_ENV_FILE}" >&2
+    echo "Fix permissions before deploy, for example: sudo chgrp $(id -gn) ${TURN_ENV_FILE} && sudo chmod 640 ${TURN_ENV_FILE}" >&2
+    exit 1
+  fi
+}
+
 stop_server() {
   local pid="$1"
   if [ -z "${pid}" ]; then
@@ -68,7 +76,8 @@ start_server() {
   cd "${APP_DIR}"
   export PORT="${PORT:-38080}"
   export HOST="${HOST:-0.0.0.0}"
-  if [ -f "${TURN_ENV_FILE}" ]; then
+  if [ -e "${TURN_ENV_FILE}" ]; then
+    validate_runtime_env
     set -a
     # shellcheck disable=SC1090
     . "${TURN_ENV_FILE}"
@@ -89,6 +98,7 @@ require_cmd git
 require_cmd rsync
 require_cmd npm
 require_cmd "${NODE_BIN}"
+validate_runtime_env
 
 old_pid="$(current_server_pid)"
 if [ -n "${old_pid}" ]; then
@@ -127,6 +137,10 @@ rsync -a --delete \
   --exclude 'node_modules/' \
   --exclude 'data/' \
   --exclude 'public/downloads/' \
+  --exclude 'deploy-backups/' \
+  --exclude '__upload_tmp/' \
+  --exclude 'logs/' \
+  --exclude 'server.pid' \
   "${CHECKOUT_DIR}/server/" "${APP_DIR}/"
 
 cd "${APP_DIR}"

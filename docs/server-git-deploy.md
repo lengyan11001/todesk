@@ -27,10 +27,13 @@ The script:
    - `/home/ubuntu/bhzn-todesk/data`
    - `/home/ubuntu/bhzn-todesk/public/downloads`
    - `/home/ubuntu/bhzn-todesk/node_modules`
-5. Runs `npm install --omit=dev`.
-6. Restarts the Node process with the previous `PORT`, `HOST`, and admin env values.
-7. Loads TURN/RTC env from `/etc/bhzn-turn/server.env` when present.
-8. Runs a local `/api/health` check.
+   - `/home/ubuntu/bhzn-todesk/deploy-backups`
+   - `/home/ubuntu/bhzn-todesk/logs`
+5. Validates that `/etc/bhzn-turn/server.env` is readable before stopping the old server.
+6. Runs `npm install --omit=dev`.
+7. Restarts the Node process with the previous `PORT`, `HOST`, and admin env values.
+8. Loads TURN/RTC env from `/etc/bhzn-turn/server.env` when present.
+9. Runs a local `/api/health` check.
 
 ## Production Env
 
