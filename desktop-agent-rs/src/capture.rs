@@ -5,8 +5,27 @@ use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageBuffer, Rgba};
 
 use crate::protocol::ScreenInfo;
 
-const MAX_SIDE: u32 = 1280;
-const FAST_MAX_SIDE: u32 = 960;
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureOptions {
+    pub max_side: u32,
+    pub jpeg_quality: u8,
+}
+
+impl CaptureOptions {
+    pub fn from_quality(quality: &crate::protocol::QualityProfile) -> Self {
+        Self {
+            max_side: quality.max_side_value(),
+            jpeg_quality: quality.jpeg_quality_value(),
+        }
+    }
+
+    fn for_fast_input(self) -> Self {
+        Self {
+            max_side: self.max_side,
+            jpeg_quality: self.jpeg_quality.saturating_sub(10).max(30),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct CaptureState {
@@ -36,16 +55,15 @@ impl CaptureState {
         self.screen
     }
 
-    pub fn capture_frame(&mut self, fast: bool) -> Result<CaptureFrame> {
+    pub fn capture_frame_with_options(&mut self, fast: bool, options: CaptureOptions) -> Result<CaptureFrame> {
         let image = capture_primary_monitor().context("capture primary monitor")?;
         let input_width = image.width();
         let input_height = image.height();
-        let max_side = if fast { FAST_MAX_SIDE } else { MAX_SIDE };
-        let image = resize_rgba(image, max_side);
+        let options = if fast { options.for_fast_input() } else { options };
+        let image = resize_rgba(image, options.max_side);
         let width = image.width();
         let height = image.height();
-        let quality = if fast { 32 } else { 48 };
-        let encoded = encode_jpeg(image, quality)?;
+        let encoded = encode_jpeg(image, options.jpeg_quality)?;
         self.screen = ScreenInfo { width, height, input_width, input_height };
         let timestamp = now_ms();
         Ok(CaptureFrame {

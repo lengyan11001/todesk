@@ -10,7 +10,7 @@ if (!(Test-Path $vcvars)) {
   throw "vcvars64.bat not found. Install Visual Studio 2022 Build Tools with C++ workload."
 }
 
-& cmd.exe /c "call `"$vcvars`" && `"$cargo`" build --release"
+& cmd.exe /c "call `"$vcvars`" && cd /d `"$PSScriptRoot`" && `"$cargo`" build --release"
 if ($LASTEXITCODE -ne 0) {
   throw "cargo build failed with exit code $LASTEXITCODE"
 }

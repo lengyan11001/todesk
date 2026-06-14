@@ -42,9 +42,8 @@ final class AndroidRtcManager {
 
     private static final String TAG = "AndroidRtcManager";
     private static final byte[] FRAME_MAGIC = new byte[] { 'B', 'H', 'Z', 'F', '1' };
-    private static final long FRAME_INTERVAL_MS = 66;
     private static final long FAST_FRAME_MS = 900;
-    private static final int JPEG_QUALITY = 48;
+    private static final long STATS_INTERVAL_MS = 2_000;
 
     private final Context context;
     private final Bridge bridge;
@@ -66,9 +65,24 @@ final class AndroidRtcManager {
         }
     }
 
-    synchronized void startSession(String sessionId, JSONArray iceServers) {
+    synchronized boolean hasActiveSessions() {
+        return !sessions.isEmpty();
+    }
+
+    synchronized QualityProfile preferredQuality() {
+        QualityProfile best = null;
+        for (RtcSession session : sessions.values()) {
+            if (best == null || session.quality.fps > best.fps || session.quality.maxSide > best.maxSide) {
+                best = session.quality;
+            }
+        }
+        return best;
+    }
+
+    synchronized void startSession(String sessionId, JSONArray iceServers, QualityProfile quality) {
         if (sessionId == null || sessionId.length() == 0) return;
         closeSession(sessionId, "replaced", false);
+        final QualityProfile sessionQuality = quality == null ? QualityProfile.balanced() : quality;
         if (!ensureFactory()) {
             sendState(sessionId, "failed", "unknown", "webrtc_unavailable");
             sendStop(sessionId, "webrtc_unavailable");
@@ -78,7 +92,7 @@ final class AndroidRtcManager {
             PeerConnection.RTCConfiguration config = new PeerConnection.RTCConfiguration(toIceServers(iceServers));
             config.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
             config.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
-            RtcSession session = new RtcSession(sessionId);
+            RtcSession session = new RtcSession(sessionId, sessionQuality);
             PeerConnection pc = factory.createPeerConnection(config, session);
             if (pc == null) {
                 sendState(sessionId, "failed", "unknown", "peer_connection_failed");
@@ -87,6 +101,11 @@ final class AndroidRtcManager {
             }
             session.pc = pc;
             sessions.put(sessionId, session);
+            Log.i(TAG, "rtc session quality: session=" + sessionId
+                    + ", profile=" + sessionQuality.profile
+                    + ", maxSide=" + sessionQuality.maxSide
+                    + ", fps=" + sessionQuality.fps
+                    + ", jpeg=" + sessionQuality.jpegQuality);
             sendState(sessionId, "checking", "unknown", "");
         } catch (Throwable error) {
             Log.w(TAG, "start rtc failed", error);
@@ -317,7 +336,7 @@ final class AndroidRtcManager {
             @Override
             public void onStateChange() {
                 if (channel.state() == DataChannel.State.OPEN) {
-                    sendState(session.sessionId, "connected", "unknown", "");
+                    sendState(session, "connected", 0, "");
                     startFrameLoop(session);
                 } else if (channel.state() == DataChannel.State.CLOSED) {
                     closeSession(session.sessionId, "frame_closed", true);
@@ -341,15 +360,27 @@ final class AndroidRtcManager {
                     Bitmap bitmap = bridge.captureRtcBitmap();
                     if (bitmap != null) {
                         try {
-                            byte[] frame = encodeFrame(bitmap);
-                            channel.send(new DataChannel.Buffer(ByteBuffer.wrap(frame), true));
+                            byte[] frame = encodeFrame(bitmap, session.quality);
+                            if (!channel.send(new DataChannel.Buffer(ByteBuffer.wrap(frame), true))) {
+                                break;
+                            }
+                            session.bytesSent += frame.length;
+                            long now = System.currentTimeMillis();
+                            if (now - session.lastStatsAt >= STATS_INTERVAL_MS) {
+                                long elapsed = Math.max(1, now - session.lastStatsAt);
+                                long delta = Math.max(0, session.bytesSent - session.lastStatsBytes);
+                                int bitrateKbps = (int) Math.min(Integer.MAX_VALUE, (delta * 8L) / elapsed);
+                                session.lastStatsAt = now;
+                                session.lastStatsBytes = session.bytesSent;
+                                sendState(session, "connected", bitrateKbps, "");
+                            }
                         } catch (Throwable error) {
                             Log.w(TAG, "send rtc frame failed", error);
                         } finally {
                             bitmap.recycle();
                         }
                     }
-                    long delay = System.currentTimeMillis() < session.fastUntil ? 33 : FRAME_INTERVAL_MS;
+                    long delay = System.currentTimeMillis() < session.fastUntil ? 33 : session.quality.frameIntervalMs();
                     try {
                         Thread.sleep(delay);
                     } catch (InterruptedException ignored) {
@@ -363,9 +394,9 @@ final class AndroidRtcManager {
         thread.start();
     }
 
-    private byte[] encodeFrame(Bitmap bitmap) throws Exception {
+    private byte[] encodeFrame(Bitmap bitmap, QualityProfile quality) throws Exception {
         ByteArrayOutputStream image = new ByteArrayOutputStream();
-        bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, image);
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality == null ? QualityProfile.balanced().jpegQuality : quality.jpegQuality, image);
         JSONObject header = JsonUtil.object();
         JsonUtil.put(header, "type", "frame");
         JsonUtil.put(header, "deviceId", bridge.deviceId());
@@ -396,6 +427,26 @@ final class AndroidRtcManager {
         JsonUtil.put(msg, "selectedCandidateType", candidateType == null ? "unknown" : candidateType);
         JsonUtil.put(msg, "rttMs", 0);
         JsonUtil.put(msg, "bitrateKbps", 0);
+        JsonUtil.put(msg, "bytesSent", 0);
+        JsonUtil.put(msg, "bytesReceived", 0);
+        JsonUtil.put(msg, "packetsLost", 0);
+        JsonUtil.put(msg, "error", error == null ? "" : error);
+        bridge.sendRtcJson(msg);
+    }
+
+    private void sendState(RtcSession session, String state, int bitrateKbps, String error) {
+        if (session == null) return;
+        JSONObject msg = JsonUtil.object();
+        JsonUtil.put(msg, "type", "rtc-state");
+        JsonUtil.put(msg, "sessionId", session.sessionId);
+        JsonUtil.put(msg, "deviceId", bridge.deviceId());
+        JsonUtil.put(msg, "state", state);
+        JsonUtil.put(msg, "selectedCandidateType", session.selectedCandidateType);
+        JsonUtil.put(msg, "rttMs", 0);
+        JsonUtil.put(msg, "bitrateKbps", Math.max(0, bitrateKbps));
+        JsonUtil.put(msg, "bytesSent", session.bytesSent);
+        JsonUtil.put(msg, "bytesReceived", session.bytesReceived);
+        JsonUtil.put(msg, "packetsLost", session.packetsLost);
         JsonUtil.put(msg, "error", error == null ? "" : error);
         bridge.sendRtcJson(msg);
     }
@@ -411,15 +462,23 @@ final class AndroidRtcManager {
 
     private final class RtcSession implements PeerConnection.Observer {
         final String sessionId;
+        final QualityProfile quality;
         final AtomicBoolean closed = new AtomicBoolean(false);
         final AtomicBoolean senderStarted = new AtomicBoolean(false);
         PeerConnection pc;
         DataChannel controlChannel;
         DataChannel frameChannel;
         volatile long fastUntil;
+        volatile String selectedCandidateType = "unknown";
+        volatile long bytesSent;
+        volatile long bytesReceived;
+        volatile long packetsLost;
+        volatile long lastStatsAt = System.currentTimeMillis();
+        volatile long lastStatsBytes;
 
-        RtcSession(String sessionId) {
+        RtcSession(String sessionId, QualityProfile quality) {
             this.sessionId = sessionId;
+            this.quality = quality == null ? QualityProfile.balanced() : quality;
         }
 
         @Override
@@ -438,7 +497,7 @@ final class AndroidRtcManager {
                     : state == PeerConnection.PeerConnectionState.DISCONNECTED ? "disconnected"
                     : state == PeerConnection.PeerConnectionState.CLOSED ? "closed"
                     : "new";
-            sendState(sessionId, value, "unknown", "");
+            sendState(this, value, 0, "");
             if (state == PeerConnection.PeerConnectionState.FAILED || state == PeerConnection.PeerConnectionState.CLOSED) {
                 closeSession(sessionId, "peer_" + value, true);
             }

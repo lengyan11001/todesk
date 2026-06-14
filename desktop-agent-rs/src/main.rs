@@ -14,22 +14,22 @@ mod rtc;
 mod secure;
 mod update;
 
-use std::{thread, time::Duration};
+use std::{collections::HashSet, thread, time::Duration};
 
 use anyhow::{Context, Result};
-use capture::CaptureState;
+use capture::{CaptureOptions, CaptureState};
 use config::AgentConfig;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, ServerEvent};
+use protocol::{BinaryFrameHeader, ClientEvent, DeviceStatus, QualityProfile, ServerEvent};
 use rtc::{RtcManager, RtcOutbound};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.9-rs";
-const FRAME_INTERVAL_IDLE: Duration = Duration::from_millis(80);
+const AGENT_VERSION: &str = "0.2.10-rs";
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
+const FRAME_INTERVAL_NO_RELAY: Duration = Duration::from_millis(250);
 const FAST_FRAME_MS: u64 = 900;
 const BINARY_FRAME_MAGIC: &[u8; 5] = b"BHZF1";
 
@@ -181,6 +181,8 @@ async fn run_once(config: AgentConfig) -> Result<()> {
     let capture = Arc::new(Mutex::new(CaptureState::new()));
     let rtc_manager = RtcManager::new(config.device_id.clone(), capture.clone(), rtc_tx);
     let fast_until = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let relay_sessions = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let relay_quality = Arc::new(Mutex::new(QualityProfile::relay()));
 
     out_tx.send(OutboundEvent::Json(ClientEvent::HelloDevice(DeviceStatus::from_config(&config, AGENT_VERSION, &capture.lock()))))?;
     log::info(format!("hello-device sent id={}", config.device_id));
@@ -230,13 +232,21 @@ async fn run_once(config: AgentConfig) -> Result<()> {
     let frame_tx = out_tx.clone();
     let frame_capture = capture.clone();
     let frame_fast_until = fast_until.clone();
+    let frame_relay_sessions = relay_sessions.clone();
+    let frame_relay_quality = relay_quality.clone();
     tokio::spawn(async move {
         let mut sent_frames: u64 = 0;
         loop {
+            if frame_relay_sessions.lock().is_empty() {
+                tokio::time::sleep(FRAME_INTERVAL_NO_RELAY).await;
+                continue;
+            }
             let fast = now_ms() < frame_fast_until.load(std::sync::atomic::Ordering::Relaxed);
+            let quality = frame_relay_quality.lock().clone().sanitize_with(&QualityProfile::relay());
+            let options = CaptureOptions::from_quality(&quality);
             let result = {
                 let mut guard = frame_capture.lock();
-                guard.capture_frame(fast)
+                guard.capture_frame_with_options(fast, options)
             };
             match result {
                 Ok(frame) => {
@@ -262,7 +272,7 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                     eprintln!("[agent-rs] capture failed: {error:#}");
                 }
             }
-            tokio::time::sleep(if fast { FRAME_INTERVAL_FAST } else { FRAME_INTERVAL_IDLE }).await;
+            tokio::time::sleep(if fast { FRAME_INTERVAL_FAST } else { frame_delay(quality.fps_value()) }).await;
         }
     });
 
@@ -285,8 +295,29 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                 log::warn("server replaced this device connection");
                 break;
             }
-            ServerEvent::StopControl { .. } => log::info("stop-control received"),
-            ServerEvent::ControlRequest { .. } => log::info("control-request received"),
+            ServerEvent::StopControl { session_id } => {
+                if let Some(session_id) = session_id.filter(|item| !item.is_empty()) {
+                    relay_sessions.lock().remove(&session_id);
+                    log::info(format!("stop-control received session={session_id} relaySessions={}", relay_sessions.lock().len()));
+                } else {
+                    relay_sessions.lock().clear();
+                    log::info("stop-control received all relay sessions cleared");
+                }
+            }
+            ServerEvent::ControlRequest { session_id, quality } => {
+                let quality = QualityProfile::with_fallback(quality, QualityProfile::relay());
+                let session_id = session_id.filter(|item| !item.is_empty()).unwrap_or_else(|| "legacy-relay".to_string());
+                relay_sessions.lock().insert(session_id.clone());
+                *relay_quality.lock() = quality.clone();
+                log::info(format!(
+                    "control-request received session={} profile={} maxSide={} fps={} jpeg={}",
+                    session_id,
+                    quality.profile_name(),
+                    quality.max_side_value(),
+                    quality.fps_value(),
+                    quality.jpeg_quality_value()
+                ));
+            }
             ServerEvent::Hello { .. } => log::info("hello received from server"),
             ServerEvent::FileTransfer(request) => {
                 log::info(format!("file-transfer received id={} name={} bytes={}", request.transfer_id, request.file_name, request.size));
@@ -297,11 +328,19 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                     let _ = status_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(status)));
                 });
             }
-            ServerEvent::RtcRequest { session_id, ice_servers, .. } => {
-                log::info(format!("rtc-request received session={session_id}"));
+            ServerEvent::RtcRequest { session_id, ice_servers, quality, .. } => {
+                let quality = QualityProfile::with_fallback(quality, QualityProfile::balanced());
+                log::info(format!(
+                    "rtc-request received session={} profile={} maxSide={} fps={} jpeg={}",
+                    session_id,
+                    quality.profile_name(),
+                    quality.max_side_value(),
+                    quality.fps_value(),
+                    quality.jpeg_quality_value()
+                ));
                 let manager = rtc_manager.clone();
                 tokio::spawn(async move {
-                    manager.start_session(session_id, ice_servers).await;
+                    manager.start_session(session_id, ice_servers, quality).await;
                 });
             }
             ServerEvent::RtcOffer { session_id, sdp, .. } => {
@@ -360,6 +399,10 @@ fn encode_binary_frame(frame: capture::CaptureFrame) -> Result<Vec<u8>> {
     out.extend_from_slice(&header);
     out.extend_from_slice(&frame.image);
     Ok(out)
+}
+
+fn frame_delay(fps: u32) -> Duration {
+    Duration::from_millis((1000 / fps.max(1) as u64).clamp(16, 333))
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {

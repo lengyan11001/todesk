@@ -5,15 +5,15 @@ Android overwrite upgrades only work when every APK uses the same `applicationId
 Current package:
 
 - `applicationId`: `top.bhzn.todesk`
-- `versionCode`: `12`
-- `versionName`: `0.1.11`
+- `versionCode`: `13`
+- `versionName`: `0.1.12`
 
 Build a signed release APK:
 
 ```powershell
 $env:BHZN_ANDROID_STORE_PASS = "replace-with-private-password"
 $env:BHZN_ANDROID_KEY_PASS = "replace-with-private-password"
-.\build-apk.ps1 -Channel release -VersionCode 12 -VersionName 0.1.11
+.\build-apk.ps1 -Channel release -VersionCode 13 -VersionName 0.1.12
 ```
 
 The release keystore is created at `android\keystore\bhzn-todesk-release.keystore` by default. Keep that file backed up privately. It is ignored by git.

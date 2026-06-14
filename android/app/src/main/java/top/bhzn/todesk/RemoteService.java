@@ -28,7 +28,9 @@ import android.view.WindowManager;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -42,11 +44,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private static final String TAG = "RemoteService";
     private static final String CHANNEL_ID = "remote_status";
     private static final int NOTIFICATION_ID = 8021;
-    private static final long FRAME_INTERVAL_MS = 90;
     private static final long HEARTBEAT_INTERVAL_MS = 15_000;
     private static final long RECONNECT_MIN_MS = 1_500;
     private static final long RECONNECT_MAX_MS = 30_000;
-    private static final int JPEG_QUALITY = 48;
     private static volatile boolean running;
     private static volatile boolean mediaReady;
     private static volatile boolean serverConnected;
@@ -67,6 +67,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private long reconnectDelayMs = RECONNECT_MIN_MS;
     private AndroidRtcManager rtcManager;
     private Bitmap latestFrame;
+    private QualityProfile relayQuality = QualityProfile.relay();
+    private QualityProfile captureQuality = QualityProfile.relay();
+    private final Set<String> relaySessions = new HashSet<>();
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
@@ -177,10 +180,10 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         screenDpi = metrics.densityDpi;
         inputWidth = Math.max(1, metrics.widthPixels);
         inputHeight = Math.max(1, metrics.heightPixels);
-        int maxSide = 720;
-        float scale = Math.min(1f, maxSide / (float) Math.max(metrics.widthPixels, metrics.heightPixels));
-        screenWidth = Math.max(1, Math.round(metrics.widthPixels * scale));
-        screenHeight = Math.max(1, Math.round(metrics.heightPixels * scale));
+        captureQuality = preferredCaptureQuality();
+        int[] size = scaledCaptureSize(captureQuality);
+        screenWidth = size[0];
+        screenHeight = size[1];
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
         imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
             @Override
@@ -233,9 +236,85 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         }
     }
 
+    private synchronized void configureCaptureQuality(QualityProfile quality) {
+        if (quality == null) return;
+        captureQuality = quality;
+        if (mediaProjection == null || inputWidth <= 0 || inputHeight <= 0 || captureHandler == null) return;
+        final QualityProfile requested = quality;
+        captureHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                recreateCaptureSurface(requested);
+            }
+        });
+    }
+
+    private synchronized void recreateCaptureSurface(QualityProfile quality) {
+        if (mediaProjection == null || quality == null || inputWidth <= 0 || inputHeight <= 0) return;
+        int[] size = scaledCaptureSize(quality);
+        if (imageReader != null && virtualDisplay != null && screenWidth == size[0] && screenHeight == size[1]) {
+            return;
+        }
+        releaseCaptureResources();
+        screenWidth = size[0];
+        screenHeight = size[1];
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+        imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+            @Override
+            public void onImageAvailable(ImageReader reader) {
+                captureFrame(reader);
+            }
+        }, captureHandler);
+        virtualDisplay = mediaProjection.createVirtualDisplay(
+                "BHZN-ToDesk",
+                screenWidth,
+                screenHeight,
+                screenDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader.getSurface(),
+                null,
+                captureHandler
+        );
+        mediaReady = true;
+        lastFrameAt = 0;
+        sendStatus();
+    }
+
+    private synchronized QualityProfile preferredCaptureQuality() {
+        QualityProfile selected = null;
+        if (!relaySessions.isEmpty()) selected = relayQuality;
+        if (rtcManager != null) {
+            QualityProfile rtcQuality = rtcManager.preferredQuality();
+            if (rtcQuality != null && (selected == null
+                    || rtcQuality.maxSide > selected.maxSide
+                    || rtcQuality.fps > selected.fps)) {
+                selected = rtcQuality;
+            }
+        }
+        if (selected != null) return selected;
+        return captureQuality == null ? QualityProfile.relay() : captureQuality;
+    }
+
+    private int[] scaledCaptureSize(QualityProfile quality) {
+        int maxSide = quality == null ? QualityProfile.relay().maxSide : quality.maxSide;
+        int sourceWidth = Math.max(1, inputWidth);
+        int sourceHeight = Math.max(1, inputHeight);
+        float scale = Math.min(1f, maxSide / (float) Math.max(sourceWidth, sourceHeight));
+        return new int[] {
+                Math.max(1, Math.round(sourceWidth * scale)),
+                Math.max(1, Math.round(sourceHeight * scale))
+        };
+    }
+
     private void captureFrame(ImageReader reader) {
         long now = System.currentTimeMillis();
-        if (now - lastFrameAt < FRAME_INTERVAL_MS) {
+        QualityProfile activeQuality = preferredCaptureQuality();
+        if (!hasRealtimeViewers()) {
+            Image skipped = reader.acquireLatestImage();
+            if (skipped != null) skipped.close();
+            return;
+        }
+        if (now - lastFrameAt < activeQuality.frameIntervalMs()) {
             Image skipped = reader.acquireLatestImage();
             if (skipped != null) skipped.close();
             return;
@@ -254,7 +333,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
             Bitmap cropped = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight);
             bitmap.recycle();
             updateLatestFrame(cropped);
-            sendFrame(cropped);
+            if (hasRelaySessions()) {
+                sendFrame(cropped, relayQuality);
+            }
             cropped.recycle();
         } catch (Exception e) {
             Log.w(TAG, "capture frame failed", e);
@@ -263,17 +344,20 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         }
     }
 
-    private void sendFrame(Bitmap bitmap) {
+    private void sendFrame(Bitmap bitmap, QualityProfile quality) {
         SimpleWebSocket socket = webSocket;
         if (socket == null) return;
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out);
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality == null ? QualityProfile.relay().jpegQuality : quality.jpegQuality, out);
         String data = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
         JSONObject msg = JsonUtil.object();
         JsonUtil.put(msg, "type", "frame");
+        JsonUtil.put(msg, "frameKind", "jpeg");
         JsonUtil.put(msg, "image", data);
         JsonUtil.put(msg, "width", screenWidth);
         JsonUtil.put(msg, "height", screenHeight);
+        JsonUtil.put(msg, "inputWidth", inputWidth);
+        JsonUtil.put(msg, "inputHeight", inputHeight);
         JsonUtil.put(msg, "timestamp", System.currentTimeMillis());
         socket.send(msg.toString());
     }
@@ -434,7 +518,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JsonUtil.put(value, "frameChannel", available);
         JsonUtil.put(value, "localNetwork", true);
         JsonUtil.put(value, "codecs", new JSONArray());
-        JsonUtil.put(value, "maxFps", available ? 15 : 0);
+        JsonUtil.put(value, "maxFps", available ? 30 : 0);
         JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + (available ? ";rtc-frame-channel" : ";native-webrtc-missing"));
         return value;
     }
@@ -480,15 +564,34 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
                 sendStatus();
             }
         } else if ("control-request".equals(type)) {
+            String sessionId = msg.optString("sessionId", "legacy-relay");
+            if (sessionId.length() == 0) sessionId = "legacy-relay";
+            relayQuality = QualityProfile.fromJson(msg.optJSONObject("quality"), QualityProfile.relay());
+            synchronized (this) {
+                relaySessions.add(sessionId);
+            }
+            configureCaptureQuality(relayQuality);
+            Log.i(TAG, "control-request received: session=" + sessionId
+                    + ", profile=" + relayQuality.profile
+                    + ", maxSide=" + relayQuality.maxSide
+                    + ", fps=" + relayQuality.fps);
             sendStatus();
         } else if ("stop-control".equals(type)) {
+            String sessionId = msg.optString("sessionId", "");
+            synchronized (this) {
+                if (sessionId.length() == 0) relaySessions.clear();
+                else relaySessions.remove(sessionId);
+            }
+            configureCaptureQuality(preferredCaptureQuality());
             sendStatus();
         } else if ("file-transfer".equals(type)) {
             handleFileTransfer(msg);
         } else if ("rtc-request".equals(type)) {
             String sessionId = msg.optString("sessionId");
+            QualityProfile quality = QualityProfile.fromJson(msg.optJSONObject("quality"), QualityProfile.balanced());
+            configureCaptureQuality(quality);
             if (rtcManager != null) {
-                rtcManager.startSession(sessionId, msg.optJSONArray("iceServers"));
+                rtcManager.startSession(sessionId, msg.optJSONArray("iceServers"), quality);
             }
         } else if ("rtc-offer".equals(type)) {
             String sessionId = msg.optString("sessionId");
@@ -507,6 +610,14 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         }
     }
 
+    private synchronized boolean hasRelaySessions() {
+        return !relaySessions.isEmpty();
+    }
+
+    private synchronized boolean hasRealtimeViewers() {
+        return !relaySessions.isEmpty() || (rtcManager != null && rtcManager.hasActiveSessions());
+    }
+
     private void sendRtcState(String sessionId, String state, String error) {
         JSONObject msg = JsonUtil.object();
         JsonUtil.put(msg, "type", "rtc-state");
@@ -516,6 +627,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JsonUtil.put(msg, "selectedCandidateType", "unknown");
         JsonUtil.put(msg, "rttMs", 0);
         JsonUtil.put(msg, "bitrateKbps", 0);
+        JsonUtil.put(msg, "bytesSent", 0);
+        JsonUtil.put(msg, "bytesReceived", 0);
+        JsonUtil.put(msg, "packetsLost", 0);
         JsonUtil.put(msg, "error", error == null ? "" : error);
         SimpleWebSocket socket = webSocket;
         if (socket != null) {

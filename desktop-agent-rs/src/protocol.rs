@@ -81,9 +81,82 @@ impl RtcCapabilities {
             frame_channel: true,
             local_network: true,
             codecs: Vec::new(),
-            max_fps: 15,
+            max_fps: 30,
             version: format!("{version};rtc-frame-channel"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityProfile {
+    pub profile: Option<String>,
+    pub max_side: Option<u32>,
+    pub fps: Option<u32>,
+    pub jpeg_quality: Option<u8>,
+    pub bitrate_kbps: Option<u32>,
+}
+
+impl QualityProfile {
+    pub fn relay() -> Self {
+        Self {
+            profile: Some("relay".to_string()),
+            max_side: Some(1280),
+            fps: Some(10),
+            jpeg_quality: Some(42),
+            bitrate_kbps: Some(1800),
+        }
+    }
+
+    pub fn balanced() -> Self {
+        Self {
+            profile: Some("balanced".to_string()),
+            max_side: Some(1600),
+            fps: Some(18),
+            jpeg_quality: Some(56),
+            bitrate_kbps: Some(3200),
+        }
+    }
+
+    pub fn with_fallback(value: Option<Self>, fallback: Self) -> Self {
+        value.unwrap_or_else(|| fallback.clone()).sanitize_with(&fallback)
+    }
+
+    pub fn sanitize_with(self, fallback: &Self) -> Self {
+        let fallback_profile = fallback.profile.as_deref().unwrap_or("balanced");
+        let profile = self
+            .profile
+            .as_deref()
+            .map(|item| item.trim().to_ascii_lowercase())
+            .filter(|item| matches!(item.as_str(), "hd" | "balanced" | "data" | "lan" | "relay"))
+            .unwrap_or_else(|| fallback_profile.to_string());
+        Self {
+            profile: Some(profile),
+            max_side: Some(self.max_side.unwrap_or_else(|| fallback.max_side_value()).clamp(480, 2560)),
+            fps: Some(self.fps.unwrap_or_else(|| fallback.fps_value()).clamp(3, 30)),
+            jpeg_quality: Some(self.jpeg_quality.unwrap_or_else(|| fallback.jpeg_quality_value()).clamp(30, 85)),
+            bitrate_kbps: Some(self.bitrate_kbps.unwrap_or_else(|| fallback.bitrate_kbps_value()).clamp(300, 20_000)),
+        }
+    }
+
+    pub fn profile_name(&self) -> &str {
+        self.profile.as_deref().unwrap_or("balanced")
+    }
+
+    pub fn max_side_value(&self) -> u32 {
+        self.max_side.unwrap_or(1280).clamp(480, 2560)
+    }
+
+    pub fn fps_value(&self) -> u32 {
+        self.fps.unwrap_or(15).clamp(3, 30)
+    }
+
+    pub fn jpeg_quality_value(&self) -> u8 {
+        self.jpeg_quality.unwrap_or(48).clamp(30, 85)
+    }
+
+    pub fn bitrate_kbps_value(&self) -> u32 {
+        self.bitrate_kbps.unwrap_or(1800).clamp(300, 20_000)
     }
 }
 
@@ -122,6 +195,9 @@ pub struct RtcState {
     pub selected_candidate_type: String,
     pub rtt_ms: u32,
     pub bitrate_kbps: u32,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub packets_lost: u64,
     pub error: String,
 }
 
@@ -135,6 +211,9 @@ impl RtcState {
             selected_candidate_type: "unknown".to_string(),
             rtt_ms: 0,
             bitrate_kbps: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            packets_lost: 0,
             error: error.chars().take(400).collect(),
         }
     }
@@ -195,9 +274,16 @@ pub enum ServerEvent {
     #[serde(rename = "server-replaced")]
     ServerReplaced,
     #[serde(rename = "control-request")]
-    ControlRequest { #[serde(rename = "sessionId")] _session_id: Option<String> },
+    ControlRequest {
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+        quality: Option<QualityProfile>,
+    },
     #[serde(rename = "stop-control")]
-    StopControl { #[serde(rename = "sessionId")] _session_id: Option<String> },
+    StopControl {
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+    },
     #[serde(rename = "hello")]
     Hello { _role: Option<String>, _id: Option<String> },
     #[serde(rename = "file-transfer")]
@@ -212,6 +298,7 @@ pub enum ServerEvent {
         _controller_id: Option<String>,
         #[serde(rename = "iceServers", default)]
         ice_servers: Vec<RtcIceServer>,
+        quality: Option<QualityProfile>,
         _mode: Option<String>,
     },
     #[serde(rename = "rtc-offer")]
@@ -320,31 +407,42 @@ mod tests {
         assert_eq!(json["deviceId"], "ABCD-1234");
         assert_eq!(json["state"], "failed");
         assert_eq!(json["selectedCandidateType"], "unknown");
+        assert_eq!(json["bytesSent"], 0);
+        assert_eq!(json["bytesReceived"], 0);
+        assert_eq!(json["packetsLost"], 0);
         assert_eq!(json["error"], "start_failed");
     }
 
     #[test]
     fn deserializes_rtc_request_event() {
         let event: ServerEvent = serde_json::from_str(
-            r#"{"type":"rtc-request","sessionId":"session-1","deviceId":"ABCD-1234","controllerId":"user-1"}"#,
+            r#"{"type":"rtc-request","sessionId":"session-1","deviceId":"ABCD-1234","controllerId":"user-1","quality":{"profile":"lan","maxSide":2560,"fps":30,"jpegQuality":70}}"#,
         )
         .unwrap();
 
         match event {
-            ServerEvent::RtcRequest { session_id, .. } => assert_eq!(session_id, "session-1"),
+            ServerEvent::RtcRequest { session_id, quality, .. } => {
+                assert_eq!(session_id, "session-1");
+                let quality = QualityProfile::with_fallback(quality, QualityProfile::balanced());
+                assert_eq!(quality.profile_name(), "lan");
+                assert_eq!(quality.max_side_value(), 2560);
+                assert_eq!(quality.fps_value(), 30);
+                assert_eq!(quality.jpeg_quality_value(), 70);
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }
 
     #[test]
     fn serializes_frame_channel_rtc_capabilities() {
-        let capabilities = serde_json::to_value(RtcCapabilities::frame_channel("0.2.9-rs")).unwrap();
+        let capabilities = serde_json::to_value(RtcCapabilities::frame_channel("0.2.10-rs")).unwrap();
 
         assert_eq!(capabilities["webrtc"], true);
         assert_eq!(capabilities["video"], false);
         assert_eq!(capabilities["dataChannel"], true);
         assert_eq!(capabilities["frameChannel"], true);
         assert_eq!(capabilities["localNetwork"], true);
-        assert_eq!(capabilities["version"], "0.2.9-rs;rtc-frame-channel");
+        assert_eq!(capabilities["maxFps"], 30);
+        assert_eq!(capabilities["version"], "0.2.10-rs;rtc-frame-channel");
     }
 }
