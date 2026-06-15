@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DiagnosticLog.info(this, "MainActivity", "onCreate");
         buildShell();
         render();
     }
@@ -51,6 +52,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        DiagnosticLog.info(this, "MainActivity", "onResume");
         render();
     }
 
@@ -58,6 +60,7 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_MEDIA_PROJECTION) {
+            DiagnosticLog.info(this, "MainActivity", "media projection result=" + resultCode + " data=" + (data != null));
             if (resultCode == RESULT_OK && data != null) {
                 Intent service = new Intent(this, RemoteService.class)
                         .setAction(RemoteService.ACTION_START)
@@ -68,8 +71,10 @@ public class MainActivity extends Activity {
                 } else {
                     startService(service);
                 }
+                DiagnosticLog.info(this, "MainActivity", "start remote service requested");
                 Toast.makeText(this, "远控服务已启动", Toast.LENGTH_SHORT).show();
             } else {
+                DiagnosticLog.info(this, "MainActivity", "media projection denied");
                 Toast.makeText(this, "未获得录屏权限", Toast.LENGTH_SHORT).show();
             }
         }
@@ -218,7 +223,24 @@ public class MainActivity extends Activity {
                 + "    输入服务：" + yesNo(input)
                 + "    服务：" + yesNo(running)
                 + "    服务器：" + yesNo(server);
+        String error = RemoteService.lastError();
+        if (error != null && error.length() > 0) {
+            state += "\n启动错误：" + error;
+        }
         card("当前状态", state, 16, false);
+
+        card("诊断日志", DiagnosticLog.recent(this, 30), 12, true);
+
+        Button clearLog = dangerButton("清空诊断日志");
+        clearLog.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                DiagnosticLog.clear(MainActivity.this);
+                Toast.makeText(MainActivity.this, "诊断日志已清空", Toast.LENGTH_SHORT).show();
+                render();
+            }
+        });
+        content.addView(clearLog, blockParams());
 
         Button start = primaryButton(running ? "重新申请录屏并启动" : "申请录屏并启动服务");
         start.setOnClickListener(new View.OnClickListener() {
@@ -518,8 +540,12 @@ public class MainActivity extends Activity {
     }
 
     private void requestMediaProjection() {
+        DiagnosticLog.info(this, "MainActivity", "request media projection");
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        if (manager == null) return;
+        if (manager == null) {
+            DiagnosticLog.info(this, "MainActivity", "MediaProjectionManager unavailable");
+            return;
+        }
         startActivityForResult(manager.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION);
     }
 

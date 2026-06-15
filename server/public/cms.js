@@ -7,6 +7,7 @@ const adminLogoutBtn = document.getElementById("adminLogoutBtn");
 const cmsContent = document.getElementById("cmsContent");
 const userTable = document.getElementById("userTable");
 const bindingTable = document.getElementById("bindingTable");
+const accountConnectionTable = document.getElementById("accountConnectionTable");
 const linkTable = document.getElementById("linkTable");
 
 let adminToken = localStorage.getItem("bhzn_admin_session") || "";
@@ -16,6 +17,15 @@ function statusText(status) {
   if (status === "approved") return "已通过";
   if (status === "rejected") return "已拒绝";
   return "待审核";
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function adminApi(path, options = {}) {
@@ -57,6 +67,7 @@ function setLoggedOut(message = "请登录管理员账号") {
   adminLogoutBtn.classList.add("hidden");
   userTable.innerHTML = "";
   bindingTable.innerHTML = "";
+  if (accountConnectionTable) accountConnectionTable.innerHTML = "";
   if (linkTable) linkTable.innerHTML = "";
   cmsState.textContent = message;
 }
@@ -135,6 +146,68 @@ function pathClass(path) {
   return "";
 }
 
+function modeText(mode) {
+  if (mode === "monitor") return "屏幕墙";
+  if (mode === "view") return "观看";
+  if (mode === "file") return "文件";
+  return "远程控制";
+}
+
+function sessionModeSummary(item) {
+  const modes = item.modes || [];
+  if (!modes.length) return "无活动会话";
+  return modes.map(modeText).join(" / ");
+}
+
+function renderAccountConnections(accounts) {
+  if (!accountConnectionTable) return;
+  if (!accounts.length) {
+    accountConnectionTable.innerHTML = `<div class="placeholder-card">暂无账号连接数据</div>`;
+    return;
+  }
+  accountConnectionTable.innerHTML = "";
+  for (const account of accounts) {
+    const row = document.createElement("div");
+    row.className = "table-row account-connection-row";
+    const devices = account.devices || [];
+    const deviceLines = devices.length ? devices.map((device) => {
+      const sessionText = device.activeSessionCount
+        ? `${device.activeSessionCount} 个会话 · ${sessionModeSummary(device)} · RTC ${device.rtcSessionCount || 0} · 中转 ${device.relaySessionCount || 0}`
+        : "未连接";
+      return `
+        <div class="account-device-line">
+          <div>
+            <strong>${escapeHtml(device.deviceId || device.id)}</strong>
+            <span>${escapeHtml(device.label || device.name || device.platform || "-")} · ${device.online ? "在线" : "离线"} · ${escapeHtml(device.agentVersion || "Agent -")}</span>
+          </div>
+          <div class="account-device-meta">
+            <i class="badge ${pathClass(device.activePath)}">${pathText(device.activePath)}</i>
+            <span>${escapeHtml(sessionText)}</span>
+            <span>录屏${device.permissions?.mediaProjection ? "已开" : "未开"} · 输入${device.permissions?.accessibility ? "已开" : "未开"}</span>
+          </div>
+        </div>
+      `;
+    }).join("") : `<div class="placeholder-card compact">暂无绑定设备</div>`;
+    row.innerHTML = `
+      <div class="account-summary">
+        <div>
+          <strong>${escapeHtml(account.username)}</strong>
+          <span>${statusText(account.status)} · 绑定 ${account.boundDeviceCount || 0} · 在线 ${account.onlineDeviceCount || 0}</span>
+        </div>
+        <div class="mini-badges">
+          <i class="badge ${account.activeSessionCount ? "good" : ""}">活跃 ${account.activeSessionCount || 0}</i>
+          <i class="badge">控制 ${account.controlSessionCount || 0}</i>
+          <i class="badge">监控 ${account.monitorSessionCount || 0}</i>
+          <i class="badge ${account.rtcSessionCount ? "good" : ""}">RTC ${account.rtcSessionCount || 0}</i>
+          <i class="badge ${account.relaySessionCount ? "danger" : ""}">中转 ${account.relaySessionCount || 0}</i>
+        </div>
+      </div>
+      <div class="account-devices">${deviceLines}</div>
+    `;
+    accountConnectionTable.appendChild(row);
+  }
+}
+
 function renderLinks(links) {
   if (!linkTable) return;
   if (!links.length) {
@@ -174,15 +247,17 @@ async function loadCms() {
   }
   cmsState.textContent = "正在加载";
   try {
-    const [me, users, bindings, links] = await Promise.all([
+    const [me, users, bindings, accountConnections, links] = await Promise.all([
       adminApi("/api/admin/me"),
       adminApi("/api/admin/users"),
       adminApi("/api/admin/bindings"),
+      adminApi("/api/admin/account-connections"),
       adminApi("/api/admin/device-links")
     ]);
     setLoggedIn(me.admin);
     renderUsers(users.users || []);
     renderBindings(bindings.bindings || []);
+    renderAccountConnections(accountConnections.accounts || []);
     renderLinks(links.links || []);
     clearTimeout(cmsRefreshTimer);
     cmsRefreshTimer = setTimeout(loadCms, 5000);

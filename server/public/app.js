@@ -647,7 +647,7 @@ function syncMonitorSessions() {
     if (!wanted.has(device.id)) continue;
     if (monitorSessions.has(device.id) || pendingControlIntents.get(device.id) === "monitor") continue;
     pendingControlIntents.set(device.id, "monitor");
-    ws.send(JSON.stringify({ type: "control", deviceId: device.id }));
+    ws.send(JSON.stringify({ type: "control", deviceId: device.id, mode: "monitor" }));
   }
 }
 
@@ -1336,7 +1336,7 @@ function fallbackToRelay(reason = "fallback") {
   if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
   activeMeta.textContent = supportsRtc(device) ? "直连失败，正在切到限时中转" : "直连未建立，正在回退中转";
   pendingControlIntents.set(deviceId, "control");
-  ws.send(JSON.stringify({ type: "control", deviceId, relayFallback: true, reason }));
+  ws.send(JSON.stringify({ type: "control", deviceId, mode: "control", relayFallback: true, reason }));
   sessionId = "";
 }
 
@@ -1626,7 +1626,7 @@ function startControl(id) {
   if (supportsRtc(device)) {
     ws.send(JSON.stringify({ type: "rtc-start", deviceId: activeDeviceId, mode: "control", quality: currentQualityProfile() }));
   } else {
-    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
+    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId, mode: "control" }));
   }
 }
 

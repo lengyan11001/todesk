@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
@@ -44,12 +45,14 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private static final String TAG = "RemoteService";
     private static final String CHANNEL_ID = "remote_status";
     private static final int NOTIFICATION_ID = 8021;
+    private static final int IMAGE_READER_MAX_IMAGES = 3;
     private static final long HEARTBEAT_INTERVAL_MS = 15_000;
     private static final long RECONNECT_MIN_MS = 1_500;
     private static final long RECONNECT_MAX_MS = 30_000;
     private static volatile boolean running;
     private static volatile boolean mediaReady;
     private static volatile boolean serverConnected;
+    private static volatile String lastError = "";
 
     private HandlerThread captureThread;
     private Handler captureHandler;
@@ -69,6 +72,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private Bitmap latestFrame;
     private QualityProfile relayQuality = QualityProfile.relay();
     private QualityProfile captureQuality = QualityProfile.relay();
+    private volatile int projectionGeneration;
     private final Set<String> relaySessions = new HashSet<>();
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
@@ -91,9 +95,14 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         return serverConnected;
     }
 
+    static String lastError() {
+        return lastError;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        DiagnosticLog.info(this, TAG, "service onCreate");
         createNotificationChannel();
         captureThread = new HandlerThread("bhzn-capture");
         captureThread.start();
@@ -104,6 +113,8 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            DiagnosticLog.info(this, TAG, "service stop requested");
+            projectionGeneration++;
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -112,24 +123,54 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
             return START_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, notification("远控服务已开启"));
-        running = true;
-        acquireWakeLock();
-
-        if (intent != null && ACTION_START.equals(intent.getAction())) {
-            int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED);
-            Intent data = intent.getParcelableExtra(EXTRA_RESULT_DATA);
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                startProjection(resultCode, data);
-            }
+        if (intent == null || !ACTION_START.equals(intent.getAction())) {
+            return START_NOT_STICKY;
         }
 
-        connect();
-        return START_STICKY;
+        int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED);
+        Intent data = intent.getParcelableExtra(EXTRA_RESULT_DATA);
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            lastError = "media_projection_denied";
+            DiagnosticLog.info(this, TAG, "media projection denied or empty result");
+            return START_NOT_STICKY;
+        }
+
+        try {
+            DiagnosticLog.info(this, TAG, "foreground start begin");
+            startRemoteForeground();
+            running = true;
+            lastError = "";
+            acquireWakeLock();
+            final int projectionResultCode = resultCode;
+            final Intent projectionData = data;
+            final int generation = ++projectionGeneration;
+            if (captureHandler == null) {
+                throw new IllegalStateException("capture handler not ready");
+            }
+            captureHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    startRemoteSession(generation, projectionResultCode, projectionData);
+                }
+            });
+            DiagnosticLog.info(this, TAG, "foreground start posted generation=" + generation);
+            return START_STICKY;
+        } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + (e.getMessage() == null ? "" : e.getMessage());
+            Log.e(TAG, "start media projection service failed", e);
+            DiagnosticLog.error(this, TAG, "start media projection service failed", e);
+            running = false;
+            mediaReady = false;
+            releaseWakeLock();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
     }
 
     @Override
     public void onDestroy() {
+        DiagnosticLog.info(this, TAG, "service onDestroy");
+        projectionGeneration++;
         running = false;
         mediaReady = false;
         closeProjection();
@@ -152,21 +193,69 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         return null;
     }
 
-    private void startProjection(int resultCode, Intent data) {
+    private void startRemoteSession(int generation, int resultCode, Intent data) {
+        if (!running || generation != projectionGeneration) {
+            DiagnosticLog.info(this, TAG, "stale remote session ignored generation=" + generation
+                    + " current=" + projectionGeneration);
+            return;
+        }
+        try {
+            DiagnosticLog.info(this, TAG, "remote session start begin generation=" + generation);
+            startProjection(generation, resultCode, data);
+            if (!running || generation != projectionGeneration) {
+                DiagnosticLog.info(this, TAG, "remote session superseded after projection generation=" + generation
+                        + " current=" + projectionGeneration);
+                return;
+            }
+            DiagnosticLog.info(this, TAG, "projection initialized mediaReady=" + mediaReady
+                    + " capture=" + screenWidth + "x" + screenHeight
+                    + " input=" + inputWidth + "x" + inputHeight);
+            connect();
+            DiagnosticLog.info(this, TAG, "websocket connect requested");
+        } catch (Exception e) {
+            lastError = e.getClass().getSimpleName() + ": " + (e.getMessage() == null ? "" : e.getMessage());
+            Log.e(TAG, "start remote session failed", e);
+            DiagnosticLog.error(this, TAG, "start remote session failed", e);
+            running = false;
+            mediaReady = false;
+            releaseWakeLock();
+            stopSelf();
+        }
+    }
+
+    private void startProjection(final int generation, int resultCode, Intent data) {
+        DiagnosticLog.info(this, TAG, "startProjection begin generation=" + generation);
         closeProjection();
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        if (manager == null) return;
+        if (manager == null) {
+            throw new IllegalStateException("MediaProjectionManager unavailable");
+        }
+        DiagnosticLog.info(this, TAG, "getMediaProjection begin");
         final MediaProjection projection = manager.getMediaProjection(resultCode, data);
-        if (projection == null) return;
+        if (projection == null) {
+            throw new IllegalStateException("MediaProjection unavailable");
+        }
+        if (!running || generation != projectionGeneration) {
+            DiagnosticLog.info(this, TAG, "projection token superseded before use generation=" + generation
+                    + " current=" + projectionGeneration);
+            try {
+                projection.stop();
+            } catch (Exception ignored) {
+            }
+            return;
+        }
         mediaProjection = projection;
         projection.registerCallback(new MediaProjection.Callback() {
             @Override
             public void onStop() {
                 if (mediaProjection != projection) {
+                    DiagnosticLog.info(RemoteService.this, TAG, "stale media projection stop ignored generation=" + generation);
                     return;
                 }
+                DiagnosticLog.info(RemoteService.this, TAG, "active media projection stopped by system generation=" + generation);
                 mediaProjection = null;
                 mediaReady = false;
+                lastError = "media_projection_stopped";
                 releaseCaptureResources();
                 sendStatus();
             }
@@ -177,6 +266,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         if (wm != null) {
             wm.getDefaultDisplay().getRealMetrics(metrics);
         }
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0 || metrics.densityDpi <= 0) {
+            metrics = getResources().getDisplayMetrics();
+        }
         screenDpi = metrics.densityDpi;
         inputWidth = Math.max(1, metrics.widthPixels);
         inputHeight = Math.max(1, metrics.heightPixels);
@@ -184,13 +276,15 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         int[] size = scaledCaptureSize(captureQuality);
         screenWidth = size[0];
         screenHeight = size[1];
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+        DiagnosticLog.info(this, TAG, "create ImageReader " + screenWidth + "x" + screenHeight + " dpi=" + screenDpi);
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, IMAGE_READER_MAX_IMAGES);
         imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
             @Override
             public void onImageAvailable(ImageReader reader) {
                 captureFrame(reader);
             }
         }, captureHandler);
+        DiagnosticLog.info(this, TAG, "create VirtualDisplay begin");
         virtualDisplay = projection.createVirtualDisplay(
                 "BHZN-ToDesk",
                 screenWidth,
@@ -201,7 +295,11 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
                 null,
                 captureHandler
         );
+        if (virtualDisplay == null) {
+            throw new IllegalStateException("VirtualDisplay unavailable");
+        }
         mediaReady = true;
+        DiagnosticLog.info(this, TAG, "startProjection complete");
         sendStatus();
     }
 
@@ -211,6 +309,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         mediaReady = false;
         releaseCaptureResources();
         if (projection != null) {
+            DiagnosticLog.info(this, TAG, "closing active media projection");
             try {
                 projection.stop();
             } catch (Exception e) {
@@ -239,14 +338,6 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private synchronized void configureCaptureQuality(QualityProfile quality) {
         if (quality == null) return;
         captureQuality = quality;
-        if (mediaProjection == null || inputWidth <= 0 || inputHeight <= 0 || captureHandler == null) return;
-        final QualityProfile requested = quality;
-        captureHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                recreateCaptureSurface(requested);
-            }
-        });
     }
 
     private synchronized void recreateCaptureSurface(QualityProfile quality) {
@@ -258,7 +349,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         releaseCaptureResources();
         screenWidth = size[0];
         screenHeight = size[1];
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, IMAGE_READER_MAX_IMAGES);
         imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
             @Override
             public void onImageAvailable(ImageReader reader) {
@@ -783,6 +874,15 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
                 .setOngoing(true)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPendingIntent)
                 .build();
+    }
+
+    private void startRemoteForeground() {
+        Notification value = notification("远控服务已开启");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, value, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+        } else {
+            startForeground(NOTIFICATION_ID, value);
+        }
     }
 
     private void createNotificationChannel() {

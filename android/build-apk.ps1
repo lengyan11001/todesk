@@ -1,8 +1,8 @@
 param(
     [string]$AndroidSdk = "D:\",
     [string]$JavaHome = "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot",
-    [int]$VersionCode = 13,
-    [string]$VersionName = "0.1.12",
+    [int]$VersionCode = 16,
+    [string]$VersionName = "0.1.15",
     [string]$WebRtcVersion = "144.7559.09",
     [ValidateSet("debug", "release")]
     [string]$Channel = "release",
@@ -89,6 +89,9 @@ $aaptLinkArgs = @(
     "--version-name", "$VersionName",
     "-o", "$Build\unsigned.apk"
 ) + $flatFiles
+if ($Channel -eq "debug") {
+    $aaptLinkArgs = @("link", "--debug-mode") + $aaptLinkArgs[1..($aaptLinkArgs.Length - 1)]
+}
 Invoke-Native $Aapt2 $aaptLinkArgs
 
 $sources = @()

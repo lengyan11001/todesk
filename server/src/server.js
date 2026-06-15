@@ -22,6 +22,9 @@ const DEFAULT_ADMIN_USERNAME = process.env.DEFAULT_ADMIN_USERNAME || "admin";
 const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "todesk2026";
 const WINDOWS_AGENT_VERSION = process.env.WINDOWS_AGENT_VERSION || "0.2.8-rs";
 const WINDOWS_AGENT_FILE = process.env.WINDOWS_AGENT_FILE || "BHZN-ToDesk-Agent.exe";
+const ANDROID_APK_VERSION = process.env.ANDROID_APK_VERSION || "0.1.15";
+const ANDROID_APK_VERSION_CODE = Number(process.env.ANDROID_APK_VERSION_CODE || 16);
+const ANDROID_APK_FILE = process.env.ANDROID_APK_FILE || "bhzn-todesk-debug.apk";
 const MAC_AGENT_VERSION = process.env.MAC_AGENT_VERSION || "0.1.21";
 const MAC_AGENT_ARM64_VERSION = process.env.MAC_AGENT_ARM64_VERSION || MAC_AGENT_VERSION;
 const MAC_AGENT_X86_64_VERSION = process.env.MAC_AGENT_X86_64_VERSION || "0.1.19";
@@ -229,6 +232,12 @@ function qualityProfileFromValue(value, fallback = "balanced") {
   return { profile: "balanced", maxSide: 1920, fps: 18, jpegQuality: 58, bitrateKbps: 3000 };
 }
 
+function sanitizeSessionMode(value) {
+  const mode = String(value || "control").toLowerCase();
+  if (["control", "monitor", "view", "file"].includes(mode)) return mode;
+  return "control";
+}
+
 function activeRtcSessionsForDevice(deviceId) {
   return Array.from(rtcSessions.values()).filter((session) => session.deviceId === deviceId);
 }
@@ -252,7 +261,7 @@ function adminRtcSessionView(session) {
     sessionId: session.sessionId,
     userId: session.userId,
     deviceId: session.deviceId,
-    mode: session.mode,
+    mode: sanitizeSessionMode(session.mode),
     createdAt: iso(session.createdAt),
     expiresAt: iso(session.expiresAt),
     ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
@@ -273,11 +282,67 @@ function adminRelaySessionView(session) {
     sessionId: session.sessionId,
     userId: session.userId,
     deviceId: session.deviceId,
-    mode: session.mode || "control",
+    mode: sanitizeSessionMode(session.mode),
+    reason: session.reason || "",
     createdAt: iso(session.createdAt),
     expiresAt: iso(session.expiresAt),
     ttlSeconds: Math.max(0, Math.floor((session.expiresAt - now()) / 1000)),
     quality: session.quality || RELAY_QUALITY_PROFILE
+  };
+}
+
+function accountConnectionView(user) {
+  const bindings = state.bindings.filter((binding) => binding.userId === user.id);
+  const rtcForUser = Array.from(rtcSessions.values()).filter((session) => session.userId === user.id);
+  const relayForUser = Array.from(controllers.values()).filter((session) => session.userId === user.id);
+  const activeDeviceIds = new Set([
+    ...rtcForUser.map((session) => session.deviceId),
+    ...relayForUser.map((session) => session.deviceId)
+  ]);
+  const devicesForUser = bindings
+    .slice()
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .map((binding) => {
+      const live = devices.get(binding.deviceId);
+      const rtcSessionsForDevice = rtcForUser.filter((session) => session.deviceId === binding.deviceId);
+      const relaySessionsForDevice = relayForUser.filter((session) => session.deviceId === binding.deviceId);
+      const stats = trafficStatsFor(binding.deviceId);
+      const sessionModes = Array.from(new Set([
+        ...rtcSessionsForDevice.map((session) => sanitizeSessionMode(session.mode)),
+        ...relaySessionsForDevice.map((session) => sanitizeSessionMode(session.mode))
+      ]));
+      return {
+        ...bindingView(binding),
+        activePath: activePathForDevice(live, stats, rtcSessionsForDevice, relaySessionsForDevice),
+        activeSessionCount: rtcSessionsForDevice.length + relaySessionsForDevice.length,
+        rtcSessionCount: rtcSessionsForDevice.length,
+        relaySessionCount: relaySessionsForDevice.length,
+        monitorSessionCount: sessionModes.includes("monitor")
+          ? rtcSessionsForDevice.filter((session) => sanitizeSessionMode(session.mode) === "monitor").length
+            + relaySessionsForDevice.filter((session) => sanitizeSessionMode(session.mode) === "monitor").length
+          : 0,
+        controlSessionCount: rtcSessionsForDevice.filter((session) => sanitizeSessionMode(session.mode) === "control").length
+          + relaySessionsForDevice.filter((session) => sanitizeSessionMode(session.mode) === "control").length,
+        modes: sessionModes,
+        activeRtcSessions: rtcSessionsForDevice.map(adminRtcSessionView),
+        activeRelaySessions: relaySessionsForDevice.map(adminRelaySessionView)
+      };
+    });
+  return {
+    userId: user.id,
+    username: user.username,
+    status: user.status,
+    boundDeviceCount: bindings.length,
+    onlineDeviceCount: devicesForUser.filter((item) => item.online).length,
+    activeDeviceCount: activeDeviceIds.size,
+    activeSessionCount: rtcForUser.length + relayForUser.length,
+    rtcSessionCount: rtcForUser.length,
+    relaySessionCount: relayForUser.length,
+    monitorSessionCount: rtcForUser.filter((session) => sanitizeSessionMode(session.mode) === "monitor").length
+      + relayForUser.filter((session) => sanitizeSessionMode(session.mode) === "monitor").length,
+    controlSessionCount: rtcForUser.filter((session) => sanitizeSessionMode(session.mode) === "control").length
+      + relayForUser.filter((session) => sanitizeSessionMode(session.mode) === "control").length,
+    devices: devicesForUser
   };
 }
 
@@ -973,7 +1038,7 @@ function startRtcSession(ws, msg) {
     iceServers,
     createdAt: now(),
     expiresAt: now() + RTC_SESSION_TTL_MS,
-    mode: String(msg.mode || "control"),
+    mode: sanitizeSessionMode(msg.mode),
     quality,
     state: "created",
     selectedCandidateType: "unknown",
@@ -1088,12 +1153,14 @@ function forwardRtcSignal(ws, msg) {
   }
 }
 
-function attachController(device, ws) {
+function attachController(device, ws, options = {}) {
   if (supportsRtcRelayBypass(device) && !ws.allowRtcRelayFallback) {
     send(ws, { type: "error", error: "rtc_required", device: deviceView(device), deviceId: device.id });
     return;
   }
   ws.allowRtcRelayFallback = false;
+  const mode = sanitizeSessionMode(options.mode);
+  const reason = String(options.reason || "").slice(0, 120);
   let replaced = 0;
   for (const existingSessionId of Array.from(ws.sessions)) {
     const existing = controllers.get(existingSessionId);
@@ -1116,7 +1183,8 @@ function attachController(device, ws) {
     deviceId: device.id,
     createdAt: now(),
     expiresAt,
-    mode: "control",
+    mode,
+    reason,
     quality: relayQuality
   });
   device.controllers.add(sessionId);
@@ -1125,6 +1193,8 @@ function attachController(device, ws) {
     sessionId,
     userId: ws.userId,
     deviceId: device.id,
+    mode,
+    reason,
     replaced,
     ttlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000),
     controllerCount: device.controllers.size
@@ -1134,6 +1204,7 @@ function attachController(device, ws) {
     sessionId,
     device: deviceView(device),
     path: "ws-relay",
+    mode,
     quality: relayQuality,
     expiresAt,
     ttlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000)
@@ -1141,6 +1212,7 @@ function attachController(device, ws) {
   send(device.ws, {
     type: "control-request",
     sessionId,
+    mode,
     controllerCount: device.controllers.size,
     quality: relayQuality,
     relayTtlSeconds: Math.floor(RELAY_SESSION_TTL_MS / 1000)
@@ -1214,6 +1286,24 @@ app.get("/api/releases/windows-agent", (req, res) => {
     platform: "windows",
     version: WINDOWS_AGENT_VERSION,
     url: `${publicBaseUrl(req)}/downloads/${encodeURIComponent(WINDOWS_AGENT_FILE)}`,
+    sha256: fileSha256(filePath),
+    size: stat.size,
+    updatedAt: stat.mtime.toISOString()
+  });
+});
+
+app.get("/api/releases/android-apk", (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, "downloads", ANDROID_APK_FILE);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: "release_not_found" });
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  res.json({
+    platform: "android",
+    version: ANDROID_APK_VERSION,
+    versionCode: ANDROID_APK_VERSION_CODE,
+    url: `${publicBaseUrl(req)}/downloads/${encodeURIComponent(ANDROID_APK_FILE)}`,
     sha256: fileSha256(filePath),
     size: stat.size,
     updatedAt: stat.mtime.toISOString()
@@ -1605,6 +1695,17 @@ app.get("/api/admin/device-links", requireAdmin, (req, res) => {
   res.json({ links, updatedAt: iso() });
 });
 
+app.get("/api/admin/account-connections", requireAdmin, (req, res) => {
+  const accounts = state.users
+    .map(accountConnectionView)
+    .sort((a, b) => {
+      if (b.activeSessionCount !== a.activeSessionCount) return b.activeSessionCount - a.activeSessionCount;
+      if (b.onlineDeviceCount !== a.onlineDeviceCount) return b.onlineDeviceCount - a.onlineDeviceCount;
+      return a.username.localeCompare(b.username);
+    });
+  res.json({ accounts, updatedAt: iso() });
+});
+
 app.post("/api/admin/traffic/:deviceId/reset", requireAdmin, (req, res) => {
   const stats = resetTrafficStats(req.params.deviceId);
   res.json({ ok: true, stats: trafficStatsView(stats) });
@@ -1849,7 +1950,10 @@ wss.on("connection", (ws) => {
           return;
         }
         ws.allowRtcRelayFallback = Boolean(msg.relayFallback || msg.allowRelayFallback);
-        attachController(device, ws);
+        attachController(device, ws, {
+          mode: sanitizeSessionMode(msg.mode),
+          reason: msg.reason || ""
+        });
         return;
       }
 

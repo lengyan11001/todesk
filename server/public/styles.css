@@ -1420,6 +1420,52 @@ canvas {
   font-weight: 600;
 }
 
+.account-connection-row {
+  display: grid;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.account-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.account-summary > div:first-child {
+  min-width: 180px;
+}
+
+.account-devices {
+  display: grid;
+  gap: 8px;
+}
+
+.account-device-line {
+  display: grid;
+  grid-template-columns: minmax(180px, .8fr) minmax(260px, 1.2fr);
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.account-device-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.placeholder-card.compact {
+  min-height: auto;
+  padding: 10px 12px;
+}
+
 .badge.good {
   color: #126339;
   background: #ddf7e8;
@@ -1454,6 +1500,16 @@ canvas {
   .table-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .account-summary,
+  .account-device-line {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .account-device-meta {
+    justify-content: flex-start;
   }
 
   .actions,
