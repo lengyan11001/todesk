@@ -46,7 +46,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private static final String CHANNEL_ID = "remote_status";
     private static final int NOTIFICATION_ID = 8021;
     private static final int IMAGE_READER_MAX_IMAGES = 3;
-    private static final long HEARTBEAT_INTERVAL_MS = 15_000;
+    private static final long HEARTBEAT_INTERVAL_MS = 8_000;
     private static final long RECONNECT_MIN_MS = 1_500;
     private static final long RECONNECT_MAX_MS = 30_000;
     private static volatile boolean running;
@@ -54,6 +54,8 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private static volatile boolean serverConnected;
     private static volatile String lastError = "";
 
+    private HandlerThread serviceThread;
+    private Handler serviceHandler;
     private HandlerThread captureThread;
     private Handler captureHandler;
     private SimpleWebSocket webSocket;
@@ -77,9 +79,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
-            if (!running || captureHandler == null) return;
+            if (!running || serviceHandler == null) return;
             sendHeartbeat();
-            captureHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
+            serviceHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
         }
     };
 
@@ -104,9 +106,10 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         super.onCreate();
         DiagnosticLog.info(this, TAG, "service onCreate");
         createNotificationChannel();
-        captureThread = new HandlerThread("bhzn-capture");
-        captureThread.start();
-        captureHandler = new Handler(captureThread.getLooper());
+        serviceThread = new HandlerThread("bhzn-service");
+        serviceThread.start();
+        serviceHandler = new Handler(serviceThread.getLooper());
+        ensureCaptureThread();
         rtcManager = new AndroidRtcManager(this, this);
     }
 
@@ -144,10 +147,10 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
             final int projectionResultCode = resultCode;
             final Intent projectionData = data;
             final int generation = ++projectionGeneration;
-            if (captureHandler == null) {
-                throw new IllegalStateException("capture handler not ready");
+            if (serviceHandler == null) {
+                throw new IllegalStateException("service handler not ready");
             }
-            captureHandler.post(new Runnable() {
+            serviceHandler.post(new Runnable() {
                 @Override
                 public void run() {
                     startRemoteSession(generation, projectionResultCode, projectionData);
@@ -180,10 +183,23 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         if (webSocket != null) {
             webSocket.close();
         }
+        if (serviceHandler != null) {
+            serviceHandler.removeCallbacksAndMessages(null);
+        }
+        if (captureHandler != null) {
+            captureHandler.removeCallbacksAndMessages(null);
+        }
         releaseWakeLock();
         serverConnected = false;
+        if (serviceThread != null) {
+            serviceThread.quitSafely();
+            serviceThread = null;
+            serviceHandler = null;
+        }
         if (captureThread != null) {
             captureThread.quitSafely();
+            captureThread = null;
+            captureHandler = null;
         }
         super.onDestroy();
     }
@@ -201,7 +217,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         }
         try {
             DiagnosticLog.info(this, TAG, "remote session start begin generation=" + generation);
-            startProjection(generation, resultCode, data);
+            startProjectionBlocking(generation, resultCode, data);
             if (!running || generation != projectionGeneration) {
                 DiagnosticLog.info(this, TAG, "remote session superseded after projection generation=" + generation
                         + " current=" + projectionGeneration);
@@ -221,6 +237,62 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
             releaseWakeLock();
             stopSelf();
         }
+    }
+
+    private synchronized void ensureCaptureThread() {
+        if (captureThread != null && captureThread.isAlive() && captureHandler != null) return;
+        captureThread = new HandlerThread("bhzn-capture");
+        captureThread.start();
+        captureHandler = new Handler(captureThread.getLooper());
+        DiagnosticLog.info(this, TAG, "capture thread ready");
+    }
+
+    private void restartCaptureThread() {
+        if (captureHandler != null) {
+            captureHandler.removeCallbacksAndMessages(null);
+        }
+        if (captureThread != null) {
+            captureThread.quitSafely();
+        }
+        captureThread = null;
+        captureHandler = null;
+        ensureCaptureThread();
+    }
+
+    private void startProjectionBlocking(final int generation, final int resultCode, final Intent data) throws Exception {
+        ensureCaptureThread();
+        final Object lock = new Object();
+        final boolean[] done = new boolean[] { false };
+        final Exception[] error = new Exception[1];
+        captureHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    startProjection(generation, resultCode, data);
+                } catch (Exception e) {
+                    error[0] = e;
+                } finally {
+                    synchronized (lock) {
+                        done[0] = true;
+                        lock.notifyAll();
+                    }
+                }
+            }
+        });
+        synchronized (lock) {
+            long deadline = System.currentTimeMillis() + 8_000;
+            while (!done[0]) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) break;
+                lock.wait(remaining);
+            }
+        }
+        if (!done[0]) {
+            DiagnosticLog.info(this, TAG, "capture thread start timed out; restarting");
+            restartCaptureThread();
+            throw new IllegalStateException("capture_thread_timeout");
+        }
+        if (error[0] != null) throw error[0];
     }
 
     private void startProjection(final int generation, int resultCode, Intent data) {
@@ -463,23 +535,27 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     }
 
     private void connect() {
-        if (webSocket != null) {
+        if (webSocket != null && webSocket.isRunning()) {
             return;
         }
+        webSocket = null;
         String url = AppPrefs.serverUrl(this).replace("https://", "wss://").replace("http://", "ws://");
         if (!url.endsWith("/ws")) {
             url = url + "/ws";
         }
         if (url.startsWith("ws://") && !isLocalWebSocket(url)) {
             Log.w(TAG, "cleartext websocket is disabled for non-local servers: " + url);
+            DiagnosticLog.info(this, TAG, "cleartext websocket blocked");
             scheduleReconnect();
             return;
         }
+        DiagnosticLog.info(this, TAG, "websocket connecting " + url);
         webSocket = new SimpleWebSocket(url, new SimpleWebSocket.Listener() {
             @Override
             public void onOpen() {
                 serverConnected = true;
                 reconnectDelayMs = RECONNECT_MIN_MS;
+                DiagnosticLog.info(RemoteService.this, TAG, "websocket open");
                 sendHello();
                 startHeartbeat();
             }
@@ -493,6 +569,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
             public void onClosed() {
                 serverConnected = false;
                 RemoteService.this.webSocket = null;
+                DiagnosticLog.info(RemoteService.this, TAG, "websocket closed");
                 scheduleReconnect();
             }
 
@@ -501,6 +578,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
                 Log.w(TAG, "websocket failed", error);
                 serverConnected = false;
                 RemoteService.this.webSocket = null;
+                DiagnosticLog.error(RemoteService.this, TAG, "websocket failed", error);
                 scheduleReconnect();
             }
         });
@@ -519,10 +597,11 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     }
 
     private void scheduleReconnect() {
-        if (!running || captureHandler == null) return;
+        if (!running || serviceHandler == null) return;
         final long delay = reconnectDelayMs;
         reconnectDelayMs = Math.min(RECONNECT_MAX_MS, reconnectDelayMs * 2);
-        captureHandler.postDelayed(new Runnable() {
+        DiagnosticLog.info(this, TAG, "websocket reconnect scheduled " + delay + "ms");
+        serviceHandler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 connect();
@@ -531,9 +610,9 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
     }
 
     private void startHeartbeat() {
-        if (captureHandler == null) return;
-        captureHandler.removeCallbacks(heartbeatRunnable);
-        captureHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+        if (serviceHandler == null) return;
+        serviceHandler.removeCallbacks(heartbeatRunnable);
+        serviceHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
     }
 
     private void sendHello() {
@@ -556,6 +635,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JSONObject msg = baseStatus("heartbeat");
         SimpleWebSocket socket = webSocket;
         if (socket != null && !socket.send(msg.toString())) {
+            DiagnosticLog.info(this, TAG, "heartbeat send failed");
             serverConnected = false;
             webSocket = null;
             scheduleReconnect();

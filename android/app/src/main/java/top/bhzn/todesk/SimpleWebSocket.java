@@ -60,6 +60,10 @@ final class SimpleWebSocket {
         }
     }
 
+    boolean isRunning() {
+        return running;
+    }
+
     synchronized boolean send(String text) {
         if (!running || out == null) return false;
         try {
