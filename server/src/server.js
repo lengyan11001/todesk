@@ -781,6 +781,7 @@ function deviceView(device) {
     agentVersion: device.agentVersion || "",
     androidVersion: device.androidVersion,
     permissions: device.permissions,
+    permissionDiagnostics: device.permissionDiagnostics || {},
     controlEnabled: device.controlEnabled,
     screen: device.screen,
     rtcCapabilities: publicRtcCapabilities(device),
@@ -1804,6 +1805,7 @@ wss.on("connection", (ws) => {
         agentVersion: String(msg.agentVersion || ""),
         androidVersion: String(msg.androidVersion || ""),
         permissions: msg.permissions || {},
+        permissionDiagnostics: msg.permissionDiagnostics || {},
         controlEnabled: Boolean(msg.controlEnabled),
         screen: msg.screen || null,
         rtcCapabilities: msg.rtcCapabilities || {},
@@ -1829,8 +1831,25 @@ wss.on("connection", (ws) => {
         if (msg.osVersion) device.osVersion = String(msg.osVersion);
         if (msg.agentVersion) device.agentVersion = String(msg.agentVersion);
         if (msg.androidVersion) device.androidVersion = String(msg.androidVersion);
+        const previousPermissions = device.permissions || {};
+        const previousControlEnabled = Boolean(device.controlEnabled);
         if (msg.permissions) device.permissions = msg.permissions;
+        if (msg.permissionDiagnostics) device.permissionDiagnostics = msg.permissionDiagnostics;
         if (typeof msg.controlEnabled === "boolean") device.controlEnabled = msg.controlEnabled;
+        if (
+          msg.type === "status"
+          || previousControlEnabled !== Boolean(device.controlEnabled)
+          || JSON.stringify(previousPermissions || {}) !== JSON.stringify(device.permissions || {})
+        ) {
+          relayLog("device.permissions", {
+            deviceId: device.id,
+            agentVersion: device.agentVersion || "",
+            androidVersion: device.androidVersion || "",
+            controlEnabled: Boolean(device.controlEnabled),
+            permissions: device.permissions || {},
+            permissionDiagnostics: device.permissionDiagnostics || {}
+          });
+        }
         if (msg.screen) device.screen = msg.screen;
         if (msg.rtcCapabilities) device.rtcCapabilities = msg.rtcCapabilities;
         if (msg.verificationCode) device.verificationCode = normalizeDeviceCode(msg.verificationCode);
@@ -1913,15 +1932,16 @@ wss.on("connection", (ws) => {
       if (msg.type === "input-result") {
         const sessionId = String(msg.sessionId || "");
         const controller = controllers.get(sessionId);
-        relayLog("input.result", {
-          sessionId,
-          inputId: String(msg.inputId || ""),
-          deviceId: ws.deviceId,
-          userId: controller?.userId || "",
-          action: String(msg.action || ""),
-          ok: Boolean(msg.ok),
-          error: String(msg.error || "")
-        });
+          relayLog("input.result", {
+            sessionId,
+            inputId: String(msg.inputId || ""),
+            deviceId: ws.deviceId,
+            userId: controller?.userId || "",
+            action: String(msg.action || ""),
+            ok: Boolean(msg.ok),
+            error: String(msg.error || ""),
+            permissionDiagnostics: msg.permissionDiagnostics || {}
+          });
         if (controller?.ws && controller.ws.readyState === WebSocket.OPEN) {
           send(controller.ws, {
             type: "input-result",
@@ -1999,7 +2019,8 @@ wss.on("connection", (ws) => {
             action: String(msg.action || ""),
             reason,
             controlEnabled: Boolean(device.controlEnabled),
-            permissions: device.permissions || {}
+            permissions: device.permissions || {},
+            permissionDiagnostics: device.permissionDiagnostics || {}
           });
           send(ws, { type: "error", error: "input_not_ready", reason, device: deviceView(device) });
           return;

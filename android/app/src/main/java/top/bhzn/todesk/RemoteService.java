@@ -669,6 +669,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JsonUtil.put(msg, "agentVersion", BuildConfig.VERSION_NAME);
         JsonUtil.put(msg, "androidVersion", Build.VERSION.RELEASE);
         JsonUtil.put(msg, "permissions", PermissionState.toJson(this, mediaReady));
+        JsonUtil.put(msg, "permissionDiagnostics", PermissionState.diagnostics(this));
         JsonUtil.put(msg, "controlEnabled", mediaReady && PermissionState.isInputControlReady(this));
         JSONObject screen = JsonUtil.object();
         JsonUtil.put(screen, "width", screenWidth);
@@ -829,6 +830,7 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JsonUtil.put(msg, "ok", ok);
         if (!ok) {
             JsonUtil.put(msg, "error", PermissionState.isInputControlReady(this) ? "dispatch_failed" : "input_service_not_ready");
+            JsonUtil.put(msg, "permissionDiagnostics", PermissionState.diagnostics(this));
         }
         SimpleWebSocket socket = webSocket;
         if (socket != null) {

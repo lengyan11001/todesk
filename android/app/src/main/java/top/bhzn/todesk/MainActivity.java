@@ -50,6 +50,9 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         DiagnosticLog.info(this, "MainActivity", "onResume");
+        if (RemoteService.isRunning()) {
+            startService(new Intent(this, RemoteService.class).setAction(RemoteService.ACTION_STATUS));
+        }
         render();
     }
 

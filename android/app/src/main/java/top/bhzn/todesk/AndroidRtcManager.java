@@ -321,7 +321,10 @@ final class AndroidRtcManager {
         JsonUtil.put(msg, "inputId", input.optString("inputId"));
         JsonUtil.put(msg, "action", input.optString("action"));
         JsonUtil.put(msg, "ok", ok);
-        if (!ok) JsonUtil.put(msg, "error", error == null ? "dispatch_failed" : error);
+        if (!ok) {
+            JsonUtil.put(msg, "error", error == null ? "dispatch_failed" : error);
+            JsonUtil.put(msg, "permissionDiagnostics", PermissionState.diagnostics(context));
+        }
         byte[] bytes = msg.toString().getBytes(StandardCharsets.UTF_8);
         channel.send(new DataChannel.Buffer(ByteBuffer.wrap(bytes), false));
     }
