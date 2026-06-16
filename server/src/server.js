@@ -379,6 +379,7 @@ function publicRtcCapabilities(device) {
 }
 
 function supportsRtcRelayBypass(device) {
+  if (String(device?.platform || "").toLowerCase() === "android") return false;
   const capabilities = publicRtcCapabilities(device);
   return Boolean(capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
 }

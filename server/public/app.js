@@ -1289,6 +1289,7 @@ function errorText(msg) {
 
 function supportsRtc(device) {
   const capabilities = device?.rtcCapabilities || {};
+  if (devicePlatform(device) === "android") return false;
   return Boolean(window.RTCPeerConnection && capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
 }
 
