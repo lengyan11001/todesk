@@ -379,7 +379,6 @@ function publicRtcCapabilities(device) {
 }
 
 function supportsRtcRelayBypass(device) {
-  if (String(device?.platform || "").toLowerCase() === "android") return false;
   const capabilities = publicRtcCapabilities(device);
   return Boolean(capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
 }
@@ -1022,14 +1021,21 @@ function startRtcSession(ws, msg) {
     send(ws, { type: "error", error: "rtc_not_supported", device: deviceView(device), deviceId: id });
     return;
   }
+  const mode = sanitizeSessionMode(msg.mode);
+  const quality = qualityProfileFromValue(msg.quality || msg.qualityProfile, "balanced");
   for (const [existingSessionId, existingSession] of Array.from(rtcSessions)) {
     if (existingSession.controllerWs === ws && existingSession.deviceId === id) {
+      if (existingSession.mode === mode && existingSession.quality?.profile === quality.profile) {
+        existingSession.expiresAt = now() + RTC_SESSION_TTL_MS;
+        existingSession.updatedAt = now();
+        send(ws, { type: "rtc-ready", ...rtcSessionView(existingSession), device: deviceView(device) });
+        return;
+      }
       stopRtcSession(existingSessionId, "replaced");
     }
   }
   const sessionId = makeSessionId();
   const iceServers = rtcIceServers(ws.userId, id, sessionId);
-  const quality = qualityProfileFromValue(msg.quality || msg.qualityProfile, "balanced");
   const session = {
     sessionId,
     userId: ws.userId,
@@ -1039,7 +1045,7 @@ function startRtcSession(ws, msg) {
     iceServers,
     createdAt: now(),
     expiresAt: now() + RTC_SESSION_TTL_MS,
-    mode: sanitizeSessionMode(msg.mode),
+    mode,
     quality,
     state: "created",
     selectedCandidateType: "unknown",

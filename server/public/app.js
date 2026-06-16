@@ -168,7 +168,7 @@ function hasInputPermission(device) {
 }
 
 function canControlDevice(device) {
-  return Boolean(hasScreenPermission(device) && hasInputPermission(device));
+  return Boolean(device?.controlEnabled && hasScreenPermission(device) && hasInputPermission(device));
 }
 
 function controlBlockReason(device) {
@@ -205,13 +205,8 @@ function setQualityProfile(profile, restart = false) {
       closeRtc("quality_changed", true);
       sessionId = "";
       activeMeta.textContent = `正在切换到${currentQualityProfile().label}档`;
-      pendingControlIntents.set(activeDeviceId, "control");
-      ws.send(JSON.stringify({
-        type: "rtc-start",
-        deviceId: activeDeviceId,
-        mode: "control",
-        quality: currentQualityProfile()
-      }));
+      pendingControlIntents.delete(activeDeviceId);
+      requestControlSession(device);
     } else if (sessionId) {
       activeMeta.textContent = "中转模式固定为省流量档";
     }
@@ -371,6 +366,14 @@ function connect() {
         renderScreenWall();
         return;
       }
+      if (msg.device.id !== activeDeviceId || !screenOpen) {
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop-control", sessionId: msg.sessionId }));
+        return;
+      }
+      if (rtcState?.deviceId === msg.device.id && intent !== "relay-fallback") {
+        if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop-control", sessionId: msg.sessionId }));
+        return;
+      }
       sessionId = msg.sessionId;
       activeDeviceId = msg.device.id;
       openScreen();
@@ -474,6 +477,7 @@ function closeScreen(stopRemote = true) {
   if (stopRemote && closingRelaySessionId && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "stop-control", sessionId: closingRelaySessionId }));
   }
+  if (closingDeviceId) pendingControlIntents.delete(closingDeviceId);
   screenOpen = false;
   sessionId = "";
   activeDeviceId = "";
@@ -499,16 +503,11 @@ function closeScreen(stopRemote = true) {
 }
 
 function resumeActiveControl() {
-  if (!screenOpen || !activeDeviceId || sessionId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!screenOpen || !activeDeviceId || sessionId || isControlStarting(activeDeviceId) || !ws || ws.readyState !== WebSocket.OPEN) return;
   const device = devices.find((item) => item.id === activeDeviceId);
   if (!device?.online || !hasScreenPermission(device)) return;
   activeMeta.textContent = "连接恢复，正在重新进入设备";
-  pendingControlIntents.set(activeDeviceId, "control");
-  if (supportsRtc(device)) {
-    ws.send(JSON.stringify({ type: "rtc-start", deviceId: activeDeviceId, mode: "control", quality: currentQualityProfile() }));
-  } else {
-    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId }));
-  }
+  requestControlSession(device);
 }
 
 function renderDevices() {
@@ -1248,6 +1247,7 @@ function setStageTab(tab) {
   screenWall.classList.toggle("hidden", activeStageTab !== "wall");
   fileTransferWorkspace.classList.toggle("hidden", activeStageTab !== "files");
   if (activeStageTab === "wall") {
+    if (activeDeviceId) pendingControlIntents.delete(activeDeviceId);
     if (screenOpen) closeScreen(true);
     wallRenderKey = "";
     renderScreenWall();
@@ -1289,8 +1289,45 @@ function errorText(msg) {
 
 function supportsRtc(device) {
   const capabilities = device?.rtcCapabilities || {};
-  if (devicePlatform(device) === "android") return false;
   return Boolean(window.RTCPeerConnection && capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
+}
+
+function rtcFirstFrameTimeoutMs(device) {
+  return devicePlatform(device) === "android" ? 15000 : 8000;
+}
+
+function isControlStarting(deviceId = activeDeviceId) {
+  const intent = deviceId ? pendingControlIntents.get(deviceId) : "";
+  return intent === "control" || intent === "relay-fallback";
+}
+
+function requestControlSession(device, options = {}) {
+  if (!device?.id || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (sessionId && activeDeviceId === device.id) return;
+  if (isControlStarting(device.id)) return;
+  pendingControlIntents.set(device.id, "control");
+  if (supportsRtc(device)) {
+    ws.send(JSON.stringify({
+      type: "rtc-start",
+      deviceId: device.id,
+      mode: "control",
+      quality: currentQualityProfile()
+    }));
+  } else {
+    ws.send(JSON.stringify({
+      type: "control",
+      deviceId: device.id,
+      mode: "control",
+      relayFallback: Boolean(options.relayFallback),
+      reason: options.reason || ""
+    }));
+  }
+}
+
+function requestRelayFallback(deviceId, reason = "fallback") {
+  if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  pendingControlIntents.set(deviceId, "relay-fallback");
+  ws.send(JSON.stringify({ type: "control", deviceId, mode: "control", relayFallback: true, reason }));
 }
 
 function closeRtc(reason = "closed", notify = true) {
@@ -1336,8 +1373,7 @@ function fallbackToRelay(reason = "fallback") {
   closeRtc(reason, true);
   if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
   activeMeta.textContent = supportsRtc(device) ? "直连失败，正在切到限时中转" : "直连未建立，正在回退中转";
-  pendingControlIntents.set(deviceId, "control");
-  ws.send(JSON.stringify({ type: "control", deviceId, mode: "control", relayFallback: true, reason }));
+  requestRelayFallback(deviceId, reason);
   sessionId = "";
 }
 
@@ -1374,7 +1410,7 @@ async function handleRtcReady(msg) {
     lastBytesReceived: 0,
     lastBytesSent: 0,
     statsTimer: 0,
-    fallbackTimer: setTimeout(() => fallbackToRelay("rtc_timeout"), 8000),
+    fallbackTimer: setTimeout(() => fallbackToRelay("rtc_timeout"), rtcFirstFrameTimeoutMs(device)),
     controlTimer: setTimeout(() => {
       if (rtcState?.sessionId === msg.sessionId && rtcState.controlChannel?.readyState !== "open") {
         fallbackToRelay("rtc_control_timeout");
@@ -1594,6 +1630,11 @@ function startControl(id) {
   const previousDeviceId = activeDeviceId;
   const previousSessionId = sessionId;
   const device = devices.find((item) => item.id === nextDeviceId);
+  if (previousDeviceId === nextDeviceId && (previousSessionId || isControlStarting(nextDeviceId))) {
+    openScreen();
+    if (device) setActiveDevice(device);
+    return;
+  }
   if (previousSessionId && previousDeviceId && previousDeviceId !== nextDeviceId && ws?.readyState === WebSocket.OPEN) {
     if (rtcState?.sessionId === previousSessionId) {
       closeRtc("switch_device", true);
@@ -1601,6 +1642,7 @@ function startControl(id) {
       ws.send(JSON.stringify({ type: "stop-control", sessionId: previousSessionId }));
     }
     sessionId = "";
+    pendingControlIntents.delete(previousDeviceId);
     if (shouldKeepMonitoring(previousDeviceId)) {
       setTimeout(() => {
         syncMonitorSessions();
@@ -1623,12 +1665,7 @@ function startControl(id) {
   activeMeta.textContent = supportsRtc(device)
     ? `正在尝试局域网/P2P 直连 · ${currentQualityProfile().label}档`
     : "正在请求控制";
-  pendingControlIntents.set(activeDeviceId, "control");
-  if (supportsRtc(device)) {
-    ws.send(JSON.stringify({ type: "rtc-start", deviceId: activeDeviceId, mode: "control", quality: currentQualityProfile() }));
-  } else {
-    ws.send(JSON.stringify({ type: "control", deviceId: activeDeviceId, mode: "control" }));
-  }
+  requestControlSession(device);
 }
 
 function escapeAttr(value) {
