@@ -14,15 +14,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
-import android.widget.CompoundButton;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.text.SimpleDateFormat;
@@ -38,6 +34,7 @@ public class MainActivity extends Activity {
     private Button homeTab;
     private Button permissionTab;
     private Button fileTab;
+    private Button logTab;
     private TextView statusLine;
     private int activeTab = 0;
 
@@ -117,9 +114,11 @@ public class MainActivity extends Activity {
         homeTab = tabButton("设备");
         permissionTab = tabButton("权限");
         fileTab = tabButton("文件");
+        logTab = tabButton("日志");
         tabs.addView(homeTab, new LinearLayout.LayoutParams(0, dp(42), 1));
         tabs.addView(permissionTab, new LinearLayout.LayoutParams(0, dp(42), 1));
         tabs.addView(fileTab, new LinearLayout.LayoutParams(0, dp(42), 1));
+        tabs.addView(logTab, new LinearLayout.LayoutParams(0, dp(42), 1));
         root.addView(tabs);
 
         ScrollView scroll = new ScrollView(this);
@@ -150,6 +149,13 @@ public class MainActivity extends Activity {
                 render();
             }
         });
+        logTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                activeTab = 3;
+                render();
+            }
+        });
         setContentView(root);
     }
 
@@ -171,52 +177,48 @@ public class MainActivity extends Activity {
         homeTab.setEnabled(activeTab != 0);
         permissionTab.setEnabled(activeTab != 1);
         fileTab.setEnabled(activeTab != 2);
+        logTab.setEnabled(activeTab != 3);
         content.removeAllViews();
         if (activeTab == 0) {
             renderHome(media, accessibility, input, running, server);
         } else if (activeTab == 1) {
             renderPermissions(media, accessibility, input, running);
-        } else {
+        } else if (activeTab == 2) {
             renderFiles();
+        } else {
+            renderLogs();
         }
     }
 
     private void renderHome(boolean media, boolean accessibility, boolean input, boolean running, boolean server) {
-        copyCard("本机设备 ID", AppPrefs.deviceId(this), "复制设备 ID");
-        copyCard("设备验证码", AppPrefs.deviceCode(this), "复制验证码");
-
-        Button resetCode = dangerButton("刷新设备验证码");
-        resetCode.setOnClickListener(new View.OnClickListener() {
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.HORIZONTAL);
+        Button start = primaryButton(running ? "重新开启" : "开启服务");
+        start.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                AppPrefs.resetDeviceCode(MainActivity.this);
-                if (RemoteService.isRunning()) {
-                    startService(new Intent(MainActivity.this, RemoteService.class).setAction(RemoteService.ACTION_STATUS));
-                }
-                Toast.makeText(MainActivity.this, "设备验证码已刷新", Toast.LENGTH_SHORT).show();
+                requestMediaProjection();
+            }
+        });
+        Button stop = dangerButton("暂停服务");
+        stop.setEnabled(running);
+        stop.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopService(new Intent(MainActivity.this, RemoteService.class).setAction(RemoteService.ACTION_STOP));
                 render();
             }
         });
-        content.addView(resetCode, blockParams());
+        LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        startParams.setMargins(0, 0, dp(8), 0);
+        controls.addView(start, startParams);
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        stopParams.setMargins(dp(8), 0, 0, 0);
+        controls.addView(stop, stopParams);
+        content.addView(controls, blockParams());
 
-        TextView serverLabel = smallLabel("服务器地址");
-        content.addView(serverLabel);
-        final EditText serverInput = new EditText(this);
-        serverInput.setSingleLine(true);
-        serverInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        serverInput.setText(AppPrefs.serverUrl(this));
-        serverInput.setSelectAllOnFocus(false);
-        content.addView(serverInput, new LinearLayout.LayoutParams(-1, dp(48)));
-
-        Button saveServer = primaryButton("保存服务器地址");
-        saveServer.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                AppPrefs.setServerUrl(MainActivity.this, serverInput.getText().toString());
-                Toast.makeText(MainActivity.this, "已保存", Toast.LENGTH_SHORT).show();
-            }
-        });
-        content.addView(saveServer, blockParams());
+        copyCard("设备 ID", AppPrefs.deviceId(this), "复制设备 ID");
+        copyCard("验证码", AppPrefs.deviceCode(this), "复制验证码");
 
         String state = "录屏：" + yesNo(media)
                 + "    无障碍：" + yesNo(accessibility)
@@ -229,38 +231,19 @@ public class MainActivity extends Activity {
         }
         card("当前状态", state, 16, false);
 
-        card("诊断日志", DiagnosticLog.recent(this, 30), 12, true);
-
-        Button clearLog = dangerButton("清空诊断日志");
-        clearLog.setOnClickListener(new View.OnClickListener() {
+        Button resetCode = dangerButton("刷新验证码");
+        resetCode.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                DiagnosticLog.clear(MainActivity.this);
-                Toast.makeText(MainActivity.this, "诊断日志已清空", Toast.LENGTH_SHORT).show();
+                AppPrefs.resetDeviceCode(MainActivity.this);
+                if (RemoteService.isRunning()) {
+                    startService(new Intent(MainActivity.this, RemoteService.class).setAction(RemoteService.ACTION_STATUS));
+                }
+                Toast.makeText(MainActivity.this, "设备验证码已刷新", Toast.LENGTH_SHORT).show();
                 render();
             }
         });
-        content.addView(clearLog, blockParams());
-
-        Button start = primaryButton(running ? "重新申请录屏并启动" : "申请录屏并启动服务");
-        start.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                requestMediaProjection();
-            }
-        });
-        content.addView(start, blockParams());
-
-        Button stop = dangerButton("停止服务");
-        stop.setEnabled(running);
-        stop.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                stopService(new Intent(MainActivity.this, RemoteService.class).setAction(RemoteService.ACTION_STOP));
-                render();
-            }
-        });
-        content.addView(stop, blockParams());
+        content.addView(resetCode, blockParams());
     }
 
     private void renderPermissions(boolean media, boolean accessibility, boolean input, boolean running) {
@@ -386,6 +369,21 @@ public class MainActivity extends Activity {
             }
         });
         content.addView(clear, blockParams());
+    }
+
+    private void renderLogs() {
+        card("诊断日志", DiagnosticLog.recent(this, 80), 12, true);
+
+        Button clearLog = dangerButton("清空诊断日志");
+        clearLog.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                DiagnosticLog.clear(MainActivity.this);
+                Toast.makeText(MainActivity.this, "诊断日志已清空", Toast.LENGTH_SHORT).show();
+                render();
+            }
+        });
+        content.addView(clearLog, blockParams());
     }
 
     private void openReceivedFile(FileTransferStore.Record record) {

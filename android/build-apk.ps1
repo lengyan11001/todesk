@@ -1,8 +1,8 @@
 param(
     [string]$AndroidSdk = "D:\",
     [string]$JavaHome = "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot",
-    [int]$VersionCode = 17,
-    [string]$VersionName = "0.1.16",
+    [int]$VersionCode = 18,
+    [string]$VersionName = "0.1.17",
     [string]$WebRtcVersion = "144.7559.09",
     [ValidateSet("debug", "release")]
     [string]$Channel = "release",
