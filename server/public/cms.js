@@ -9,6 +9,7 @@ const userTable = document.getElementById("userTable");
 const bindingTable = document.getElementById("bindingTable");
 const accountConnectionTable = document.getElementById("accountConnectionTable");
 const linkTable = document.getElementById("linkTable");
+const remoteDeviceTable = document.getElementById("remoteDeviceTable");
 
 let adminToken = localStorage.getItem("bhzn_admin_session") || "";
 let cmsRefreshTimer = 0;
@@ -69,7 +70,31 @@ function setLoggedOut(message = "请登录管理员账号") {
   bindingTable.innerHTML = "";
   if (accountConnectionTable) accountConnectionTable.innerHTML = "";
   if (linkTable) linkTable.innerHTML = "";
+  if (remoteDeviceTable) remoteDeviceTable.innerHTML = "";
   cmsState.textContent = message;
+}
+
+function renderRemoteDevices(devices) {
+  if (!remoteDeviceTable) return;
+  if (!devices.length) {
+    remoteDeviceTable.innerHTML = `<div class="placeholder-card">暂无已打开远程支持的在线设备</div>`;
+    return;
+  }
+  remoteDeviceTable.innerHTML = "";
+  for (const device of devices) {
+    const row = document.createElement("div");
+    row.className = "table-row";
+    const owners = (device.owners || []).map((owner) => escapeHtml(owner.username)).join(", ") || "未绑定账号";
+    row.innerHTML = `
+      <div>
+        <strong>${escapeHtml(device.name || device.id)}</strong>
+        <span>设备编号：${escapeHtml(device.id)} · ${escapeHtml(device.platform || "-")} · ${escapeHtml(device.agentVersion || "Agent")}</span>
+        <span>绑定账号：${owners}</span>
+      </div>
+      <div class="mini-badges"><i class="badge good">已打开</i><i class="badge">${device.controlEnabled ? "可控制" : "仅查看"}</i></div>
+    `;
+    remoteDeviceTable.appendChild(row);
+  }
 }
 
 function renderUsers(users) {
@@ -247,18 +272,20 @@ async function loadCms() {
   }
   cmsState.textContent = "正在加载";
   try {
-    const [me, users, bindings, accountConnections, links] = await Promise.all([
+    const [me, users, bindings, accountConnections, links, remoteDevices] = await Promise.all([
       adminApi("/api/admin/me"),
       adminApi("/api/admin/users"),
       adminApi("/api/admin/bindings"),
       adminApi("/api/admin/account-connections"),
-      adminApi("/api/admin/device-links")
+      adminApi("/api/admin/device-links"),
+      adminApi("/api/admin/remote-devices")
     ]);
     setLoggedIn(me.admin);
     renderUsers(users.users || []);
     renderBindings(bindings.bindings || []);
     renderAccountConnections(accountConnections.accounts || []);
     renderLinks(links.links || []);
+    renderRemoteDevices(remoteDevices.devices || []);
     clearTimeout(cmsRefreshTimer);
     cmsRefreshTimer = setTimeout(loadCms, 5000);
   } catch {

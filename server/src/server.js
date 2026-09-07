@@ -786,6 +786,11 @@ function deviceView(device) {
     screen: device.screen,
     rtcCapabilities: publicRtcCapabilities(device),
     online: true,
+    // A device is considered remote-support enabled only while its agent
+    // websocket is alive.  The Online switch controls the agent process, so
+    // this flag intentionally mirrors the live connection instead of a
+    // stale persisted binding.
+    supportEnabled: true,
     lastSeen: device.lastSeen,
     controllerCount: device.controllers.size
   };
@@ -1701,6 +1706,26 @@ app.get("/api/admin/device-links", requireAdmin, (req, res) => {
       };
     });
   res.json({ links, updatedAt: iso() });
+});
+
+// Devices with remote support explicitly enabled in Online.  Offline
+// bindings are intentionally excluded: an administrator should only see
+// machines that can be controlled right now.
+app.get("/api/admin/remote-devices", requireAdmin, (req, res) => {
+  pruneDevices();
+  const remoteDevices = Array.from(devices.values())
+    .filter((device) => device.ws && device.ws.readyState === WebSocket.OPEN)
+    .map((device) => {
+      const owners = state.bindings
+        .filter((binding) => binding.deviceId === device.id)
+        .map((binding) => {
+          const user = state.users.find((item) => item.id === binding.userId);
+          return { userId: binding.userId, username: user?.username || "unknown", bindingId: binding.id };
+        });
+      return { ...deviceView(device), owners };
+    })
+    .sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+  res.json({ devices: remoteDevices, updatedAt: iso() });
 });
 
 app.get("/api/admin/account-connections", requireAdmin, (req, res) => {
