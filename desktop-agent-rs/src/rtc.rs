@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use openh264::{encoder::{BitRate, Encoder, EncoderConfig, FrameRate, UsageType}, formats::{BgraSliceU8, YUVBuffer}};
+use openh264::{encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, UsageType}, formats::{BgraSliceU8, YUVBuffer}};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -352,7 +352,8 @@ impl RtcManager {
                     .bitrate(BitRate::from_bps(session.quality.bitrate_kbps_value().saturating_mul(1000)))
                     .max_frame_rate(FrameRate::from_hz(session.quality.fps_value() as f32))
                     .skip_frames(true)
-                    .num_threads(0),
+                    .complexity(Complexity::Low)
+                    .num_threads(4),
             ) {
                 Ok(value) => value,
                 Err(error) => {
