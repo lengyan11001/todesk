@@ -21,7 +21,7 @@ impl CaptureOptions {
 
     fn for_fast_input(self) -> Self {
         Self {
-            max_side: self.max_side,
+            max_side: self.max_side.min(1280),
             jpeg_quality: self.jpeg_quality.saturating_sub(10).max(30),
         }
     }
@@ -37,6 +37,7 @@ pub struct CaptureFrame {
     pub frame_id: u64,
     pub frame_kind: String,
     pub image: Vec<u8>,
+    pub bgra: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub input_width: u32,
@@ -56,6 +57,14 @@ impl CaptureState {
     }
 
     pub fn capture_frame_with_options(&mut self, fast: bool, options: CaptureOptions) -> Result<CaptureFrame> {
+        self.capture_frame_inner(fast, options, true)
+    }
+
+    pub fn capture_frame_for_rtc(&mut self, fast: bool, options: CaptureOptions) -> Result<CaptureFrame> {
+        self.capture_frame_inner(fast, options, false)
+    }
+
+    fn capture_frame_inner(&mut self, fast: bool, options: CaptureOptions, encode_jpeg_frame: bool) -> Result<CaptureFrame> {
         let image = capture_primary_monitor().context("capture primary monitor")?;
         let input_width = image.width();
         let input_height = image.height();
@@ -63,13 +72,20 @@ impl CaptureState {
         let image = resize_rgba(image, options.max_side);
         let width = image.width();
         let height = image.height();
-        let encoded = encode_jpeg(image, options.jpeg_quality)?;
+        let rgba = image.to_rgba8();
+        let bgra = rgba.pixels().flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]]).collect();
+        let encoded = if encode_jpeg_frame {
+            encode_jpeg(DynamicImage::ImageRgba8(rgba), options.jpeg_quality)?
+        } else {
+            Vec::new()
+        };
         self.screen = ScreenInfo { width, height, input_width, input_height };
         let timestamp = now_ms();
         Ok(CaptureFrame {
             frame_id: timestamp,
-            frame_kind: "jpeg".to_string(),
+            frame_kind: if encode_jpeg_frame { "jpeg".to_string() } else { "raw".to_string() },
             image: encoded,
+            bgra,
             width,
             height,
             input_width,

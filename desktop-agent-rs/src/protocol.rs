@@ -73,16 +73,16 @@ pub struct RtcCapabilities {
 }
 
 impl RtcCapabilities {
-    pub fn frame_channel(version: &str) -> Self {
+    pub fn video_track(version: &str) -> Self {
         Self {
             webrtc: true,
-            video: false,
+            video: true,
             data_channel: true,
-            frame_channel: true,
+            frame_channel: false,
             local_network: true,
-            codecs: Vec::new(),
+            codecs: vec!["H264".to_string()],
             max_fps: 30,
-            version: format!("{version};rtc-frame-channel"),
+            version: format!("{version};rtc-video-track"),
         }
     }
 }
@@ -112,9 +112,9 @@ impl QualityProfile {
         Self {
             profile: Some("balanced".to_string()),
             max_side: Some(1600),
-            fps: Some(18),
-            jpeg_quality: Some(56),
-            bitrate_kbps: Some(3200),
+            fps: Some(24),
+            jpeg_quality: Some(62),
+            bitrate_kbps: Some(3000),
         }
     }
 
@@ -251,7 +251,7 @@ impl DeviceStatus {
             control_enabled: true,
             screen,
             verification_code: config.verification_code.clone(),
-            rtc_capabilities: RtcCapabilities::frame_channel(version),
+            rtc_capabilities: RtcCapabilities::video_track(version),
         }
     }
 }
@@ -434,15 +434,15 @@ mod tests {
     }
 
     #[test]
-    fn serializes_frame_channel_rtc_capabilities() {
-        let capabilities = serde_json::to_value(RtcCapabilities::frame_channel("0.2.10-rs")).unwrap();
+    fn serializes_video_track_rtc_capabilities() {
+        let capabilities = serde_json::to_value(RtcCapabilities::video_track("0.2.10-rs")).unwrap();
 
         assert_eq!(capabilities["webrtc"], true);
-        assert_eq!(capabilities["video"], false);
+        assert_eq!(capabilities["video"], true);
         assert_eq!(capabilities["dataChannel"], true);
-        assert_eq!(capabilities["frameChannel"], true);
+        assert_eq!(capabilities["frameChannel"], false);
         assert_eq!(capabilities["localNetwork"], true);
         assert_eq!(capabilities["maxFps"], 30);
-        assert_eq!(capabilities["version"], "0.2.10-rs;rtc-frame-channel");
+        assert_eq!(capabilities["version"], "0.2.10-rs;rtc-video-track");
     }
 }

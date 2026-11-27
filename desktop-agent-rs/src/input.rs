@@ -21,6 +21,7 @@ pub fn handle_input(event: InputEvent, capture: &CaptureState) -> Result<()> {
             move_mouse(x, y)?;
             mouse_up(button)
         }
+        "move" => move_mouse(x, y),
         "swipe" | "homeSwipe" => drag(x, y, x2, y2, event.duration.unwrap_or(120.0), button),
         "scroll" => scroll(event.delta_y.unwrap_or(0.0)),
         "key" => key(event.key.as_deref().unwrap_or(""), event.modifiers.unwrap_or_default()),

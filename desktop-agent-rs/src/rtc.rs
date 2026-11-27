@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -9,11 +9,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use openh264::{encoder::{BitRate, Encoder, EncoderConfig, FrameRate, UsageType}, formats::{BgraSliceU8, YUVBuffer}};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::mpsc;
 use webrtc::{
-    api::{media_engine::MediaEngine, APIBuilder},
+    api::{media_engine::{MediaEngine, MIME_TYPE_H264}, APIBuilder},
     data_channel::{data_channel_message::DataChannelMessage, RTCDataChannel},
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     peer_connection::{
@@ -22,10 +23,12 @@ use webrtc::{
         sdp::session_description::RTCSessionDescription,
         RTCPeerConnection,
     },
+    track::track_local::track_local_static_sample::TrackLocalStaticSample,
+    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
 };
 
 use crate::{
-    capture::{CaptureFrame, CaptureOptions, CaptureState},
+    capture::{CaptureOptions, CaptureState},
     input,
     log,
     protocol::{
@@ -35,9 +38,6 @@ use crate::{
 };
 
 const RTC_FAST_FRAME_MS: u64 = 900;
-const RTC_STATS_INTERVAL_MS: u64 = 2_000;
-const RTC_BINARY_FRAME_MAGIC: &[u8; 5] = b"BHZF1";
-
 pub enum RtcOutbound {
     Json(ClientEvent),
 }
@@ -53,12 +53,10 @@ struct RtcSession {
     session_id: String,
     pc: RTCPeerConnection,
     control_channel: Mutex<Option<Arc<RTCDataChannel>>>,
-    frame_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    video_track: Arc<TrackLocalStaticSample>,
+    video_started: AtomicBool,
     quality: QualityProfile,
     fast_until: AtomicU64,
-    bytes_sent: AtomicU64,
-    bytes_received: AtomicU64,
-    packets_lost: AtomicU64,
 }
 
 impl RtcManager {
@@ -146,16 +144,25 @@ impl RtcManager {
         let pc = api
             .new_peer_connection(RTCConfiguration { ice_servers: convert_ice_servers(ice_servers), ..Default::default() })
             .await?;
+        let video_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_H264.to_string(),
+                clock_rate: 90_000,
+                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_string(),
+                ..Default::default()
+            },
+            "screen".to_string(),
+            "bhzn".to_string(),
+        ));
+        let _ = pc.add_track(Arc::clone(&video_track) as Arc<dyn webrtc::track::track_local::TrackLocal + Send + Sync>).await?;
         let session = Arc::new(RtcSession {
             session_id: session_id.to_string(),
             pc,
             control_channel: Mutex::new(None),
-            frame_channel: Mutex::new(None),
+            video_track,
+            video_started: AtomicBool::new(false),
             quality,
             fast_until: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            bytes_received: AtomicU64::new(0),
-            packets_lost: AtomicU64::new(0),
         });
 
         let manager = Arc::clone(self);
@@ -205,8 +212,6 @@ impl RtcManager {
                 let label = channel.label().to_string();
                 if label == "control" {
                     manager.attach_control_channel(Arc::clone(&session), channel);
-                } else if label == "frames" {
-                    manager.attach_frame_channel(Arc::clone(&session), channel);
                 }
             })
         }));
@@ -226,6 +231,7 @@ impl RtcManager {
                 sdp: local.sdp,
             })))
             .ok();
+        self.spawn_frame_loop(session);
         Ok(())
     }
 
@@ -241,20 +247,6 @@ impl RtcManager {
                 }
                 let text = String::from_utf8_lossy(&message.data).to_string();
                 manager.handle_control_message(session, text).await;
-            })
-        }));
-    }
-
-    fn attach_frame_channel(self: &Arc<Self>, session: Arc<RtcSession>, channel: Arc<RTCDataChannel>) {
-        session.frame_channel.lock().replace(Arc::clone(&channel));
-        let manager = Arc::clone(self);
-        let open_session = Arc::clone(&session);
-        channel.on_open(Box::new(move || {
-            let manager = Arc::clone(&manager);
-            let session = Arc::clone(&open_session);
-            Box::pin(async move {
-                log::info(format!("rtc frame channel open session={}", session.session_id));
-                manager.spawn_frame_loop(session);
             })
         }));
     }
@@ -306,13 +298,30 @@ impl RtcManager {
     }
 
     fn spawn_frame_loop(self: &Arc<Self>, session: Arc<RtcSession>) {
+        if session.video_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let manager = Arc::clone(self);
         tokio::spawn(async move {
-            let mut sent_frames: u64 = 0;
-            let mut last_stats_at = now_ms();
-            let mut last_stats_bytes = 0u64;
             let capture_options = CaptureOptions::from_quality(&session.quality);
             let normal_delay = frame_delay(session.quality.fps_value());
+            let mut next_frame = tokio::time::Instant::now();
+            let mut encoder = match Encoder::with_api_config(
+                openh264::OpenH264API::from_source(),
+                EncoderConfig::new()
+                    .usage_type(UsageType::ScreenContentRealTime)
+                    .bitrate(BitRate::from_bps(session.quality.bitrate_kbps_value().saturating_mul(1000)))
+                    .max_frame_rate(FrameRate::from_hz(session.quality.fps_value() as f32))
+                    .skip_frames(true)
+                    .num_threads(0),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::warn(format!("rtc video encoder init failed session={}: {error}", session.session_id));
+                    manager.close_session(&session.session_id).await;
+                    return;
+                }
+            };
             log::info(format!(
                 "rtc frame quality session={} profile={} maxSide={} fps={} jpeg={} bitrate={}kbps",
                 session.session_id,
@@ -323,44 +332,48 @@ impl RtcManager {
                 session.quality.bitrate_kbps_value()
             ));
             loop {
-                let channel = session.frame_channel.lock().clone();
-                let Some(channel) = channel else {
+                if matches!(session.pc.connection_state(), RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) {
                     break;
-                };
+                }
                 let fast = now_ms() < session.fast_until.load(Ordering::Relaxed);
+                let interval = if fast { Duration::from_millis(33) } else { normal_delay };
                 let frame = {
                     let mut capture = manager.capture.lock();
-                    capture.capture_frame_with_options(fast, capture_options)
+                    capture.capture_frame_for_rtc(fast, capture_options)
                 };
                 match frame {
                     Ok(frame) => {
-                        sent_frames += 1;
-                        match encode_rtc_binary_frame(&manager.device_id, frame) {
-                            Ok(payload) => {
-                                let payload_len = payload.len() as u64;
-                                if channel.send(&Bytes::from(payload)).await.is_err() {
-                                    break;
-                                }
-                                let bytes_sent = session.bytes_sent.fetch_add(payload_len, Ordering::Relaxed) + payload_len;
-                                let now = now_ms();
-                                if now.saturating_sub(last_stats_at) >= RTC_STATS_INTERVAL_MS {
-                                    let elapsed_ms = now.saturating_sub(last_stats_at).max(1);
-                                    let delta_bytes = bytes_sent.saturating_sub(last_stats_bytes);
-                                    let bitrate_kbps = ((delta_bytes.saturating_mul(8)) / elapsed_ms).min(u32::MAX as u64) as u32;
-                                    last_stats_at = now;
-                                    last_stats_bytes = bytes_sent;
-                                    manager.send_state_with_stats(&session, "connected", "unknown", bitrate_kbps, "");
-                                }
-                                if sent_frames == 1 || sent_frames % 300 == 0 {
-                                    log::info(format!("rtc frame sent session={} count={sent_frames}", session.session_id));
+                        let source = BgraSliceU8::new(&frame.bgra, (frame.width as usize, frame.height as usize));
+                        let yuv = YUVBuffer::from_bgra8_source(source);
+                        let encoded = match encoder.encode(&yuv) {
+                            Ok(value) => Some(value.to_vec()),
+                            Err(error) => {
+                                log::warn(format!("rtc video encode failed session={}: {error}", session.session_id));
+                                None
+                            }
+                        };
+                        if let Some(encoded) = encoded {
+                            if session.pc.connection_state() == RTCPeerConnectionState::Connected {
+                                let sample = webrtc::media::Sample {
+                                    data: Bytes::from(encoded),
+                                    duration: Duration::from_millis((1000 / session.quality.fps_value().max(1)) as u64),
+                                    ..Default::default()
+                                };
+                                if let Err(error) = session.video_track.write_sample(&sample).await {
+                                    log::warn(format!("rtc video sample failed session={}: {error:#}", session.session_id));
                                 }
                             }
-                            Err(error) => log::warn(format!("rtc encode frame failed session={}: {error:#}", session.session_id)),
                         }
                     }
                     Err(error) => log::warn(format!("rtc capture failed session={}: {error:#}", session.session_id)),
                 }
-                tokio::time::sleep(if fast { Duration::from_millis(33) } else { normal_delay }).await;
+                next_frame += interval;
+                let now = tokio::time::Instant::now();
+                if next_frame > now {
+                    tokio::time::sleep(next_frame - now).await;
+                } else {
+                    next_frame = now;
+                }
             }
             manager.close_session(&session.session_id).await;
         });
@@ -399,23 +412,6 @@ impl RtcManager {
             .ok();
     }
 
-    fn send_state_with_stats(&self, session: &RtcSession, state: &str, candidate_type: &str, bitrate_kbps: u32, error: &str) {
-        self.out_tx
-            .send(RtcOutbound::Json(ClientEvent::RtcState(RtcState {
-                session_id: session.session_id.clone(),
-                device_id: self.device_id.clone(),
-                state: state.to_string(),
-                selected_candidate_type: candidate_type.to_string(),
-                rtt_ms: 0,
-                bitrate_kbps,
-                bytes_sent: session.bytes_sent.load(Ordering::Relaxed),
-                bytes_received: session.bytes_received.load(Ordering::Relaxed),
-                packets_lost: session.packets_lost.load(Ordering::Relaxed),
-                error: error.chars().take(400).collect(),
-            })))
-            .ok();
-    }
-
     fn send_stop(&self, session_id: &str, reason: &str) {
         self.out_tx
             .send(RtcOutbound::Json(ClientEvent::RtcStop(RtcStop::new(&self.device_id, session_id, reason))))
@@ -443,31 +439,6 @@ fn convert_ice_servers(values: Vec<ProtocolIceServer>) -> Vec<RTCIceServer> {
 
 fn frame_delay(fps: u32) -> Duration {
     Duration::from_millis((1000 / fps.max(1) as u64).clamp(16, 333))
-}
-
-fn encode_rtc_binary_frame(device_id: &str, frame: CaptureFrame) -> Result<Vec<u8>> {
-    let header = json!({
-        "type": "frame",
-        "deviceId": device_id,
-        "frameId": frame.frame_id,
-        "frameKind": frame.frame_kind,
-        "width": frame.width,
-        "height": frame.height,
-        "inputWidth": frame.input_width,
-        "inputHeight": frame.input_height,
-        "timestamp": frame.timestamp,
-        "transport": "rtc-datachannel"
-    });
-    let header = serde_json::to_vec(&header)?;
-    if header.len() > u32::MAX as usize {
-        anyhow::bail!("rtc frame header too large");
-    }
-    let mut out = Vec::with_capacity(RTC_BINARY_FRAME_MAGIC.len() + 4 + header.len() + frame.image.len());
-    out.extend_from_slice(RTC_BINARY_FRAME_MAGIC);
-    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
-    out.extend_from_slice(&header);
-    out.extend_from_slice(&frame.image);
-    Ok(out)
 }
 
 fn now_ms() -> u64 {
