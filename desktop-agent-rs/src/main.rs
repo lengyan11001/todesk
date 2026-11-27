@@ -27,7 +27,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.10-rs";
+const AGENT_VERSION: &str = "0.2.11-rs";
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FRAME_INTERVAL_NO_RELAY: Duration = Duration::from_millis(250);
 const FAST_FRAME_MS: u64 = 900;
@@ -155,11 +155,15 @@ fn run_gui(_config: AgentConfig) -> Result<()> {
 async fn run_forever(config: AgentConfig) -> Result<()> {
     let mut delay = Duration::from_millis(1500);
     loop {
+        #[cfg(windows)]
+        gui::set_connection_connecting();
         match run_once(config.clone()).await {
             Ok(()) => delay = Duration::from_millis(1500),
             Err(error) => {
                 log::warn(format!("disconnected: {error:#}"));
                 eprintln!("[agent-rs] disconnected: {error:#}");
+                #[cfg(windows)]
+                gui::set_connection_error(&format!("{error:#}"));
             }
         }
         tokio::time::sleep(delay).await;
@@ -169,7 +173,7 @@ async fn run_forever(config: AgentConfig) -> Result<()> {
 
 async fn run_once(config: AgentConfig) -> Result<()> {
     let ws_url = config.ws_url()?;
-    log::info(format!("connecting {}", ws_url));
+    log::info(format!("connecting websocket url={} tls_roots=webpki", ws_url));
     eprintln!("[agent-rs] connecting {ws_url}");
     let (ws, _) = connect_async(ws_url.as_str()).await.context("connect websocket")?;
     log::info("connected websocket");
@@ -318,7 +322,11 @@ async fn run_once(config: AgentConfig) -> Result<()> {
                     quality.jpeg_quality_value()
                 ));
             }
-            ServerEvent::Hello { .. } => log::info("hello received from server"),
+            ServerEvent::Hello { .. } => {
+                log::info("hello received from server");
+                #[cfg(windows)]
+                gui::set_connection_connected();
+            }
             ServerEvent::FileTransfer(request) => {
                 log::info(format!("file-transfer received id={} name={} bytes={}", request.transfer_id, request.file_name, request.size));
                 let _ = out_tx.send(OutboundEvent::Json(ClientEvent::FileTransferStatus(file_transfer::downloading_status(&request))));
@@ -369,7 +377,7 @@ async fn run_once(config: AgentConfig) -> Result<()> {
 
     log::warn("websocket reader ended");
     write_task.abort();
-    Ok(())
+    anyhow::bail!("websocket reader ended")
 }
 
 fn now_ms() -> u64 {
