@@ -212,6 +212,8 @@ impl RtcManager {
                 let label = channel.label().to_string();
                 if label == "control" {
                     manager.attach_control_channel(Arc::clone(&session), channel);
+                } else if label == "pointer" {
+                    manager.attach_pointer_channel(Arc::clone(&session), channel);
                 }
             })
         }));
@@ -249,6 +251,43 @@ impl RtcManager {
                 manager.handle_control_message(session, text).await;
             })
         }));
+    }
+
+    fn attach_pointer_channel(self: &Arc<Self>, session: Arc<RtcSession>, channel: Arc<RTCDataChannel>) {
+        let manager = Arc::clone(self);
+        channel.on_message(Box::new(move |message: DataChannelMessage| {
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            Box::pin(async move {
+                if !message.is_string {
+                    return;
+                }
+                let text = String::from_utf8_lossy(&message.data).to_string();
+                manager.handle_pointer_message(session, text).await;
+            })
+        }));
+    }
+
+    async fn handle_pointer_message(self: &Arc<Self>, session: Arc<RtcSession>, text: String) {
+        let mut value = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        if value.get("type").and_then(|item| item.as_str()) != Some("input") {
+            return;
+        }
+        if let Some(object) = value.as_object_mut() {
+            object.insert("sessionId".to_string(), serde_json::Value::String(session.session_id.clone()));
+        }
+        let input: InputEvent = match serde_json::from_value(value) {
+            Ok(input) => input,
+            Err(_) => return,
+        };
+        session.fast_until.store(now_ms() + RTC_FAST_FRAME_MS, Ordering::Relaxed);
+        let _ = {
+            let capture = self.capture.lock();
+            input::handle_input(input, &capture)
+        };
     }
 
     async fn handle_control_message(self: &Arc<Self>, session: Arc<RtcSession>, text: String) {
