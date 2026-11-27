@@ -154,6 +154,9 @@ impl RtcManager {
             "screen".to_string(),
             "bhzn".to_string(),
         ));
+        let _ = pc
+            .add_track(Arc::clone(&video_track) as Arc<dyn webrtc::track::track_local::TrackLocal + Send + Sync>)
+            .await?;
         let session = Arc::new(RtcSession {
             session_id: session_id.to_string(),
             pc,
@@ -222,27 +225,6 @@ impl RtcManager {
 
     async fn apply_offer(self: &Arc<Self>, session: Arc<RtcSession>, sdp: String) -> Result<()> {
         session.pc.set_remote_description(RTCSessionDescription::offer(sdp)?).await?;
-        // Attach the video track to the video transceiver created from the
-        // browser's recvonly m-line.  Adding a new track here creates a second
-        // m-line (mid:1) that Chrome ignores, so no RTP video ever flows.
-        let track = Arc::clone(&session.video_track)
-            as Arc<dyn webrtc::track::track_local::TrackLocal + Send + Sync>;
-        let mut attached = false;
-        for transceiver in session.pc.get_transceivers().await {
-            if transceiver.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video {
-                transceiver
-                    .set_direction(
-                        webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection::Sendonly,
-                    )
-                    .await;
-                transceiver.sender().await.replace_track(Some(track.clone())).await?;
-                attached = true;
-                break;
-            }
-        }
-        if !attached {
-            let _ = session.pc.add_track(track).await?;
-        }
         let answer = session.pc.create_answer(None).await?;
         session.pc.set_local_description(answer).await?;
         let local = session.pc.local_description().await.context("missing local description")?;
