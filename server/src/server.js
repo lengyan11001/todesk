@@ -380,7 +380,7 @@ function publicRtcCapabilities(device) {
 
 function supportsRtcRelayBypass(device) {
   const capabilities = publicRtcCapabilities(device);
-  return Boolean(capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
+  return Boolean(capabilities.webrtc && capabilities.video);
 }
 
 function hasActiveRtcSessionForDevice(deviceId) {
@@ -1023,7 +1023,7 @@ function startRtcSession(ws, msg) {
     return;
   }
   const rtcCapabilities = publicRtcCapabilities(device);
-  if (!rtcCapabilities.webrtc || !(rtcCapabilities.video || rtcCapabilities.frameChannel)) {
+  if (!rtcCapabilities.webrtc || !rtcCapabilities.video) {
     send(ws, { type: "error", error: "rtc_not_supported", device: deviceView(device), deviceId: id });
     return;
   }

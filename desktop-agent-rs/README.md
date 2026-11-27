@@ -71,6 +71,10 @@ Run with a specific config file:
 
 Local config is stored under `%APPDATA%\BHZN-ToDesk\agent.json`. On Windows, sensitive values are saved with DPAPI protected fields.
 
+The client bundles Mozilla WebPKI public roots for HTTPS/WSS connections while
+still enforcing certificate and hostname verification. This avoids failures
+on Windows machines with an outdated or incomplete local root certificate store.
+
 ## License Boundary
 
 Allowed:

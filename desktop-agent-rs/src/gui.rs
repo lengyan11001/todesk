@@ -3,7 +3,7 @@ use std::{
     ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        OnceLock,
+        Mutex, OnceLock,
     },
 };
 
@@ -26,15 +26,22 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
-    PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT,
-    WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    KillTimer, PostQuitMessage, RegisterClassW, SetTimer, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::{config::AgentConfig, file_transfer, AGENT_VERSION};
 
 static GUI_CONFIG: OnceLock<AgentConfig> = OnceLock::new();
 static ACTIVE_TAB: AtomicUsize = AtomicUsize::new(0);
+static CONNECTION_STATE: AtomicUsize = AtomicUsize::new(0);
+static RECONNECT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
+
+const CONNECTION_CONNECTING: usize = 1;
+const CONNECTION_CONNECTED: usize = 2;
+const CONNECTION_ERROR: usize = 3;
 
 const BLUE: u32 = 0x1677FF;
 const BLUE_DARK: u32 = 0x0F5FD8;
@@ -47,6 +54,40 @@ const SIDEBAR: u32 = 0xEEF3F8;
 const CARD: u32 = 0xFFFFFF;
 const WARNING_BG: u32 = 0xFFF7E5;
 const WARNING_LINE: u32 = 0xFFE1A6;
+
+pub(crate) fn set_connection_connecting() {
+    CONNECTION_STATE.store(CONNECTION_CONNECTING, Ordering::Relaxed);
+    RECONNECT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn set_connection_connected() {
+    CONNECTION_STATE.store(CONNECTION_CONNECTED, Ordering::Relaxed);
+    if let Some(error) = LAST_ERROR.get() {
+        if let Ok(mut value) = error.lock() {
+            value.clear();
+        }
+    }
+}
+
+pub(crate) fn set_connection_error(message: &str) {
+    CONNECTION_STATE.store(CONNECTION_ERROR, Ordering::Relaxed);
+    let error = LAST_ERROR.get_or_init(|| Mutex::new(String::new()));
+    if let Ok(mut value) = error.lock() {
+        *value = message.chars().take(180).collect();
+    }
+}
+
+fn connection_snapshot() -> (usize, usize, String) {
+    let error = LAST_ERROR
+        .get()
+        .and_then(|value| value.lock().ok().map(|message| message.clone()))
+        .unwrap_or_default();
+    (
+        CONNECTION_STATE.load(Ordering::Relaxed),
+        RECONNECT_COUNT.load(Ordering::Relaxed),
+        error,
+    )
+}
 
 pub fn run(config: AgentConfig) -> Result<()> {
     let _ = GUI_CONFIG.set(config);
@@ -84,6 +125,7 @@ pub fn run(config: AgentConfig) -> Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);
         let _ = InvalidateRect(Some(hwnd), None, true);
+        let _ = SetTimer(Some(hwnd), 1, 1000, None);
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
@@ -106,7 +148,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             handle_click(hwnd, x, y);
             LRESULT(0)
         }
+        WM_TIMER => {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            let _ = KillTimer(Some(hwnd), 1);
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -170,6 +217,7 @@ unsafe fn draw_main(hdc: HDC) {
     let code = config.map(|item| item.verification_code.as_str()).unwrap_or("-");
     let server = config.map(|item| item.server.as_str()).unwrap_or("-");
     let name = config.map(|item| item.name.as_str()).unwrap_or("-");
+    let (connection_state, reconnect_count, last_error) = connection_snapshot();
     let log_path = config
         .map(|item| item.path.parent().map(|parent| parent.join("agent.log")).unwrap_or_else(|| "agent.log".into()))
         .map(|path| path.display().to_string())
@@ -182,8 +230,18 @@ unsafe fn draw_main(hdc: HDC) {
     pill(hdc, 576, 64, 682, 100, "快速设置", false);
 
     draw_text(hdc, "允许控制本设备", 184, 126, 330, 152, TEXT, 16, true, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    draw_round_rect(hdc, 334, 130, 366, 148, 9, BLUE, BLUE);
-    draw_text(hdc, "已连接到服务器", 386, 126, 540, 152, GREEN, 13, true, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    let (status_label, status_color) = match connection_state {
+        CONNECTION_CONNECTED => ("已连接到服务器", GREEN),
+        CONNECTION_CONNECTING => ("连接中...", BLUE),
+        CONNECTION_ERROR => ("未连接", 0xC0392B),
+        _ => ("启动中...", MUTED),
+    };
+    draw_round_rect(hdc, 334, 130, 366, 148, 9, status_color, status_color);
+    draw_text(hdc, status_label, 386, 126, 540, 152, status_color, 13, true, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    draw_text(hdc, &format!("重连次数: {reconnect_count}"), 184, 278, 360, 300, MUTED, 12, false, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if !last_error.is_empty() {
+        draw_text(hdc, &format!("最近错误: {last_error}"), 370, 278, 724, 300, 0xC0392B, 11, false, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
 
     draw_round_rect(hdc, 184, 168, 724, 272, 12, CARD, CARD);
     draw_text(hdc, "设备代码", 210, 190, 310, 214, MUTED, 13, false, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);

@@ -10,7 +10,7 @@ use crate::secure;
 
 const DEFAULT_SERVER_KEY: u8 = 0x5A;
 const DEFAULT_SERVER_DATA: &[u8] = &[
-    50, 46, 46, 42, 41, 96, 117, 117, 46, 53, 62, 63, 41, 49, 116, 56, 50, 32, 52, 116, 46, 53, 42,
+    50, 46, 46, 42, 41, 96, 117, 117, 56, 50, 32, 52, 116, 46, 53, 42,
 ];
 
 #[derive(Clone, Debug)]

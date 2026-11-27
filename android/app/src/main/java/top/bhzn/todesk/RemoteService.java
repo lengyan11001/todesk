@@ -685,13 +685,18 @@ public class RemoteService extends Service implements AndroidRtcManager.Bridge {
         JSONObject value = JsonUtil.object();
         boolean available = rtcManager != null && rtcManager.isAvailable();
         JsonUtil.put(value, "webrtc", available);
-        JsonUtil.put(value, "video", false);
+        JsonUtil.put(value, "video", available);
         JsonUtil.put(value, "dataChannel", available);
-        JsonUtil.put(value, "frameChannel", available);
+        JsonUtil.put(value, "frameChannel", false);
         JsonUtil.put(value, "localNetwork", true);
-        JsonUtil.put(value, "codecs", new JSONArray());
+        JSONArray codecs = new JSONArray();
+        if (available) {
+            codecs.put("VP8");
+            codecs.put("H264");
+        }
+        JsonUtil.put(value, "codecs", codecs);
         JsonUtil.put(value, "maxFps", available ? 30 : 0);
-        JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + (available ? ";rtc-frame-channel" : ";native-webrtc-missing"));
+        JsonUtil.put(value, "version", BuildConfig.VERSION_NAME + (available ? ";rtc-video-track" : ";native-webrtc-missing"));
         return value;
     }
 

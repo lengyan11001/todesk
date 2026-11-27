@@ -370,7 +370,7 @@ function connect() {
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop-control", sessionId: msg.sessionId }));
         return;
       }
-      if (rtcState?.deviceId === msg.device.id && intent !== "relay-fallback") {
+      if (rtcState?.deviceId === msg.device.id) {
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "stop-control", sessionId: msg.sessionId }));
         return;
       }
@@ -1289,7 +1289,7 @@ function errorText(msg) {
 
 function supportsRtc(device) {
   const capabilities = device?.rtcCapabilities || {};
-  return Boolean(window.RTCPeerConnection && capabilities.webrtc && (capabilities.video || capabilities.frameChannel));
+  return Boolean(window.RTCPeerConnection && capabilities.webrtc && capabilities.video);
 }
 
 function rtcFirstFrameTimeoutMs(device) {
@@ -1298,7 +1298,7 @@ function rtcFirstFrameTimeoutMs(device) {
 
 function isControlStarting(deviceId = activeDeviceId) {
   const intent = deviceId ? pendingControlIntents.get(deviceId) : "";
-  return intent === "control" || intent === "relay-fallback";
+  return intent === "control";
 }
 
 function requestControlSession(device, options = {}) {
@@ -1324,12 +1324,6 @@ function requestControlSession(device, options = {}) {
   }
 }
 
-function requestRelayFallback(deviceId, reason = "fallback") {
-  if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
-  pendingControlIntents.set(deviceId, "relay-fallback");
-  ws.send(JSON.stringify({ type: "control", deviceId, mode: "control", relayFallback: true, reason }));
-}
-
 function closeRtc(reason = "closed", notify = true) {
   const state = rtcState;
   rtcState = null;
@@ -1338,16 +1332,6 @@ function closeRtc(reason = "closed", notify = true) {
   clearInterval(state?.statsTimer);
   try {
     state?.controlChannel?.close();
-  } catch {
-    // Best effort close.
-  }
-  try {
-    state?.telemetryChannel?.close();
-  } catch {
-    // Best effort close.
-  }
-  try {
-    state?.frameChannel?.close();
   } catch {
     // Best effort close.
   }
@@ -1369,11 +1353,10 @@ function closeRtc(reason = "closed", notify = true) {
 
 function fallbackToRelay(reason = "fallback") {
   const deviceId = rtcState?.deviceId || activeDeviceId;
-  const device = devices.find((item) => item.id === deviceId);
   closeRtc(reason, true);
   if (!deviceId || !ws || ws.readyState !== WebSocket.OPEN) return;
-  activeMeta.textContent = supportsRtc(device) ? "直连失败，正在切到限时中转" : "直连未建立，正在回退中转";
-  requestRelayFallback(deviceId, reason);
+  pendingControlIntents.delete(deviceId);
+  activeMeta.textContent = `WebRTC 直连失败（${reason}），未启用 JPEG 中转`;
   sessionId = "";
 }
 
@@ -1395,14 +1378,16 @@ async function handleRtcReady(msg) {
   }
   const pc = new RTCPeerConnection({ iceServers: msg.iceServers || [] });
   const controlChannel = pc.createDataChannel("control", { ordered: true });
-  const frameChannel = pc.createDataChannel("frames", { ordered: false, maxRetransmits: 0 });
-  const telemetryChannel = pc.createDataChannel("telemetry", { ordered: false, maxRetransmits: 0 });
   const wantsVideoTrack = Boolean(device?.rtcCapabilities?.video);
+  if (!wantsVideoTrack) {
+    closeRtc("video_track_required", false);
+    activeMeta.textContent = "设备未提供 WebRTC 视频轨道";
+    return;
+  }
+  pc.addTransceiver("video", { direction: "recvonly" });
   rtcState = {
     pc,
     controlChannel,
-    frameChannel,
-    telemetryChannel,
     sessionId: msg.sessionId,
     deviceId: msg.deviceId,
     connected: false,
@@ -1439,25 +1424,7 @@ async function handleRtcReady(msg) {
       activeMeta.textContent = `输入执行失败：${payload.error || "dispatch_failed"}`;
     }
   });
-  frameChannel.binaryType = "arraybuffer";
-  frameChannel.addEventListener("open", () => {
-    if (rtcState?.sessionId !== msg.sessionId) return;
-    rtcState.connected = true;
-    clearTimeout(rtcState.fallbackTimer);
-    viewer.classList.add("rtc-active", "has-frame");
-    activeMeta.textContent = "WebRTC 画面通道已建立";
-  });
-  frameChannel.addEventListener("message", (event) => {
-    handleRtcFrameMessage(event.data, msg.sessionId);
-  });
-  frameChannel.addEventListener("close", () => {
-    if (rtcState?.sessionId === msg.sessionId && rtcState.connected) fallbackToRelay("rtc_frame_closed");
-  });
-  frameChannel.addEventListener("error", () => {
-    if (rtcState?.sessionId === msg.sessionId) fallbackToRelay("rtc_frame_error");
-  });
   if (wantsVideoTrack) {
-    pc.addTransceiver("video", { direction: "recvonly" });
     pc.addEventListener("track", (event) => {
       if (rtcState?.sessionId !== msg.sessionId) return;
       const stream = event.streams[0] || new MediaStream([event.track]);
@@ -1482,13 +1449,8 @@ async function handleRtcReady(msg) {
     reportRtcState(state);
     if (state === "connected") {
       startRtcStats();
-      if (wantsVideoTrack) {
-        rtcState.connected = true;
-        clearTimeout(rtcState.fallbackTimer);
-        activeMeta.textContent = "WebRTC 直连已建立";
-      } else {
-        activeMeta.textContent = "WebRTC 画面通道连接中";
-      }
+      rtcState.connected = true;
+      activeMeta.textContent = "WebRTC 传输已连接，等待视频轨道";
     }
     if (state === "failed") fallbackToRelay("rtc_failed");
     if (state === "closed") closeRtc("rtc_closed", false);
@@ -1793,12 +1755,6 @@ function parseBinaryFrame(data) {
     header,
     image: new Uint8Array(buffer, dataStart)
   };
-}
-
-async function handleRtcFrameMessage(data, rtcSessionId) {
-  if (!rtcState || rtcState.sessionId !== rtcSessionId) return;
-  const payload = data instanceof Blob ? await data.arrayBuffer() : data;
-  await handleBinaryFrame(payload, "rtc");
 }
 
 async function handleBinaryFrame(data, source = "relay") {

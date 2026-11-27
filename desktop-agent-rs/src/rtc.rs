@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use openh264::{encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, UsageType}, formats::{BgraSliceU8, YUVBuffer}};
 use parking_lot::Mutex;
@@ -226,13 +226,14 @@ impl RtcManager {
     async fn apply_offer(self: &Arc<Self>, session: Arc<RtcSession>, sdp: String) -> Result<()> {
         session.pc.set_remote_description(RTCSessionDescription::offer(sdp)?).await?;
         let answer = session.pc.create_answer(None).await?;
+        let merged_sdp = merge_answer_video_sdp(&answer.sdp);
+        let answer = RTCSessionDescription::answer(merged_sdp.clone())?;
         session.pc.set_local_description(answer).await?;
-        let local = session.pc.local_description().await.context("missing local description")?;
         self.out_tx
             .send(RtcOutbound::Json(ClientEvent::RtcAnswer(RtcSdp {
                 session_id: session.session_id.clone(),
                 device_id: self.device_id.clone(),
-                sdp: local.sdp,
+                sdp: merged_sdp,
             })))
             .ok();
         self.spawn_frame_loop(session);
@@ -477,6 +478,74 @@ fn convert_ice_servers(values: Vec<ProtocolIceServer>) -> Vec<RTCIceServer> {
             })
         })
         .collect()
+}
+
+
+fn merge_answer_video_sdp(sdp: &str) -> String {
+    let lines: Vec<String> = sdp.lines().map(|line| line.to_string()).collect();
+    let video_starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("m=video"))
+        .map(|(index, _)| index)
+        .collect();
+    if video_starts.len() < 2 {
+        return sdp.to_string();
+    }
+    let first = video_starts[0];
+    let second = video_starts[1];
+    let second_end = lines[second + 1..]
+        .iter()
+        .position(|line| line.starts_with("m="))
+        .map(|offset| second + 1 + offset)
+        .unwrap_or(lines.len());
+
+    let first_section = &lines[first..second];
+    let second_section = &lines[second..second_end];
+    let second_mid = second_section
+        .iter()
+        .find_map(|line| line.strip_prefix("a=mid:"))
+        .unwrap_or("1")
+        .to_string();
+
+    let mut moved: Vec<String> = second_section
+        .iter()
+        .filter(|line| line.starts_with("a=ssrc") || line.starts_with("a=msid"))
+        .cloned()
+        .collect();
+
+    let mut merged_first: Vec<String> = Vec::new();
+    let mut direction_seen = false;
+    for line in first_section {
+        if line.starts_with("a=sendrecv") || line.starts_with("a=recvonly") {
+            merged_first.push("a=sendonly".to_string());
+            direction_seen = true;
+        } else {
+            merged_first.push(line.clone());
+        }
+    }
+    if !direction_seen {
+        merged_first.push("a=sendonly".to_string());
+    }
+    merged_first.append(&mut moved);
+
+    let mut head: Vec<String> = lines[..first].to_vec();
+    for line in &mut head {
+        if let Some(rest) = line.strip_prefix("a=group:BUNDLE") {
+            let kept: Vec<&str> = rest
+                .split_whitespace()
+                .filter(|token| *token != second_mid)
+                .collect();
+            *line = format!("a=group:BUNDLE {}", kept.join(" "));
+        }
+    }
+
+    let mut out = head;
+    out.extend(merged_first);
+    out.extend_from_slice(&lines[second_end..]);
+    let mut text = out.join("\r\n");
+    text.push_str("\r\n");
+    text
 }
 
 fn frame_delay(fps: u32) -> Duration {

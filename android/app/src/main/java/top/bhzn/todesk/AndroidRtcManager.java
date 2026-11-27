@@ -3,11 +3,10 @@ package top.bhzn.todesk;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.util.Log;
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +22,10 @@ import org.webrtc.PeerConnectionFactory;
 import org.webrtc.RtpReceiver;
 import org.webrtc.SessionDescription;
 import org.webrtc.SdpObserver;
+import org.webrtc.JavaI420Buffer;
+import org.webrtc.VideoFrame;
+import org.webrtc.VideoSource;
+import org.webrtc.VideoTrack;
 
 final class AndroidRtcManager {
     interface Bridge {
@@ -41,9 +44,7 @@ final class AndroidRtcManager {
     }
 
     private static final String TAG = "AndroidRtcManager";
-    private static final byte[] FRAME_MAGIC = new byte[] { 'B', 'H', 'Z', 'F', '1' };
     private static final long FAST_FRAME_MS = 900;
-    private static final long STATS_INTERVAL_MS = 2_000;
 
     private final Context context;
     private final Bridge bridge;
@@ -100,6 +101,12 @@ final class AndroidRtcManager {
                 return;
             }
             session.pc = pc;
+            session.videoSource = factory.createVideoSource(false);
+            session.videoSource.setIsScreencast(true);
+            session.videoTrack = factory.createVideoTrack("screen", session.videoSource);
+            if (pc.addTrack(session.videoTrack, Arrays.asList("bhzn")) == null) {
+                throw new IllegalStateException("add video track failed");
+            }
             sessions.put(sessionId, session);
             Log.i(TAG, "rtc session quality: session=" + sessionId
                     + ", profile=" + sessionQuality.profile
@@ -156,12 +163,8 @@ final class AndroidRtcManager {
         RtcSession session = sessions.remove(sessionId);
         if (session == null) return;
         session.closed.set(true);
-        if (session.frameChannel != null) {
-            try {
-                session.frameChannel.close();
-            } catch (Throwable ignored) {
-            }
-        }
+        if (session.videoTrack != null) session.videoTrack.dispose();
+        if (session.videoSource != null) session.videoSource.dispose();
         if (session.controlChannel != null) {
             try {
                 session.controlChannel.close();
@@ -224,6 +227,7 @@ final class AndroidRtcManager {
                         JsonUtil.put(msg, "deviceId", bridge.deviceId());
                         JsonUtil.put(msg, "sdp", description.description);
                         bridge.sendRtcJson(msg);
+                        startVideoLoop(session);
                     }
 
                     @Override
@@ -329,58 +333,26 @@ final class AndroidRtcManager {
         channel.send(new DataChannel.Buffer(ByteBuffer.wrap(bytes), false));
     }
 
-    private void attachFrameChannel(final RtcSession session, final DataChannel channel) {
-        session.frameChannel = channel;
-        channel.registerObserver(new DataChannel.Observer() {
-            @Override
-            public void onBufferedAmountChange(long previousAmount) {
-            }
-
-            @Override
-            public void onStateChange() {
-                if (channel.state() == DataChannel.State.OPEN) {
-                    sendState(session, "connected", 0, "");
-                    startFrameLoop(session);
-                } else if (channel.state() == DataChannel.State.CLOSED) {
-                    closeSession(session.sessionId, "frame_closed", true);
-                }
-            }
-
-            @Override
-            public void onMessage(DataChannel.Buffer buffer) {
-            }
-        });
-    }
-
-    private void startFrameLoop(final RtcSession session) {
+    private void startVideoLoop(final RtcSession session) {
         if (session.senderStarted.getAndSet(true)) return;
         Thread thread = new Thread(new Runnable() {
             @Override
             public void run() {
                 while (!session.closed.get()) {
-                    DataChannel channel = session.frameChannel;
-                    if (channel == null || channel.state() != DataChannel.State.OPEN) break;
-                    Bitmap bitmap = bridge.captureRtcBitmap();
+                    Bitmap captured = bridge.captureRtcBitmap();
+                    Bitmap bitmap = scaleBitmap(captured, session.quality.maxSide);
                     if (bitmap != null) {
                         try {
-                            byte[] frame = encodeFrame(bitmap, session.quality);
-                            if (!channel.send(new DataChannel.Buffer(ByteBuffer.wrap(frame), true))) {
-                                break;
-                            }
-                            session.bytesSent += frame.length;
-                            long now = System.currentTimeMillis();
-                            if (now - session.lastStatsAt >= STATS_INTERVAL_MS) {
-                                long elapsed = Math.max(1, now - session.lastStatsAt);
-                                long delta = Math.max(0, session.bytesSent - session.lastStatsBytes);
-                                int bitrateKbps = (int) Math.min(Integer.MAX_VALUE, (delta * 8L) / elapsed);
-                                session.lastStatsAt = now;
-                                session.lastStatsBytes = session.bytesSent;
-                                sendState(session, "connected", bitrateKbps, "");
+                            VideoFrame videoFrame = bitmapToVideoFrame(bitmap);
+                            if (videoFrame != null) {
+                                session.videoSource.getCapturerObserver().onFrameCaptured(videoFrame);
+                                videoFrame.release();
                             }
                         } catch (Throwable error) {
-                            Log.w(TAG, "send rtc frame failed", error);
+                            Log.w(TAG, "publish rtc video frame failed", error);
                         } finally {
-                            bitmap.recycle();
+                            if (bitmap != captured && !bitmap.isRecycled()) bitmap.recycle();
+                            if (captured != null && captured != bitmap && !captured.isRecycled()) captured.recycle();
                         }
                     }
                     long delay = System.currentTimeMillis() < session.fastUntil ? 33 : session.quality.frameIntervalMs();
@@ -391,34 +363,79 @@ final class AndroidRtcManager {
                         break;
                     }
                 }
-                closeSession(session.sessionId, "frame_loop_stopped", true);
+                closeSession(session.sessionId, "video_loop_stopped", true);
             }
-        }, "bhzn-rtc-frames-" + session.sessionId);
+        }, "bhzn-rtc-video-" + session.sessionId);
         thread.start();
     }
 
-    private byte[] encodeFrame(Bitmap bitmap, QualityProfile quality) throws Exception {
-        ByteArrayOutputStream image = new ByteArrayOutputStream();
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality == null ? QualityProfile.balanced().jpegQuality : quality.jpegQuality, image);
-        JSONObject header = JsonUtil.object();
-        JsonUtil.put(header, "type", "frame");
-        JsonUtil.put(header, "deviceId", bridge.deviceId());
-        JsonUtil.put(header, "frameId", System.currentTimeMillis());
-        JsonUtil.put(header, "frameKind", "jpeg");
-        JsonUtil.put(header, "width", bridge.screenWidth());
-        JsonUtil.put(header, "height", bridge.screenHeight());
-        JsonUtil.put(header, "inputWidth", bridge.inputWidth());
-        JsonUtil.put(header, "inputHeight", bridge.inputHeight());
-        JsonUtil.put(header, "timestamp", System.currentTimeMillis());
-        JsonUtil.put(header, "transport", "rtc-datachannel");
-        byte[] headerBytes = header.toString().getBytes(StandardCharsets.UTF_8);
-        byte[] imageBytes = image.toByteArray();
-        ByteBuffer out = ByteBuffer.allocate(FRAME_MAGIC.length + 4 + headerBytes.length + imageBytes.length);
-        out.put(FRAME_MAGIC);
-        out.order(ByteOrder.LITTLE_ENDIAN).putInt(headerBytes.length);
-        out.put(headerBytes);
-        out.put(imageBytes);
-        return out.array();
+    private Bitmap scaleBitmap(Bitmap bitmap, int maxSide) {
+        if (bitmap == null || bitmap.isRecycled()) return null;
+        int side = Math.max(bitmap.getWidth(), bitmap.getHeight());
+        if (maxSide <= 0 || side <= maxSide) return bitmap;
+        float scale = maxSide / (float) side;
+        int width = Math.max(2, Math.round(bitmap.getWidth() * scale) & ~1);
+        int height = Math.max(2, Math.round(bitmap.getHeight() * scale) & ~1);
+        return Bitmap.createScaledBitmap(bitmap, width, height, true);
+    }
+
+    private VideoFrame bitmapToVideoFrame(Bitmap bitmap) {
+        int width = bitmap.getWidth() & ~1;
+        int height = bitmap.getHeight() & ~1;
+        if (width < 2 || height < 2) return null;
+        int[] pixels = new int[width * height];
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+        int chromaWidth = width / 2;
+        int chromaHeight = height / 2;
+        ByteBuffer y = ByteBuffer.allocateDirect(width * height);
+        ByteBuffer u = ByteBuffer.allocateDirect(chromaWidth * chromaHeight);
+        ByteBuffer v = ByteBuffer.allocateDirect(chromaWidth * chromaHeight);
+        for (int row = 0; row < height; row++) {
+            for (int col = 0; col < width; col++) {
+                int color = pixels[row * width + col];
+                y.put(row * width + col, (byte) rgbToY((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff));
+            }
+        }
+        for (int row = 0; row < height; row += 2) {
+            for (int col = 0; col < width; col += 2) {
+                int red = 0;
+                int green = 0;
+                int blue = 0;
+                for (int dy = 0; dy < 2; dy++) {
+                    for (int dx = 0; dx < 2; dx++) {
+                        int color = pixels[(row + dy) * width + col + dx];
+                        red += (color >> 16) & 0xff;
+                        green += (color >> 8) & 0xff;
+                        blue += color & 0xff;
+                    }
+                }
+                int index = (row / 2) * chromaWidth + (col / 2);
+                u.put(index, (byte) rgbToU(red / 4, green / 4, blue / 4));
+                v.put(index, (byte) rgbToV(red / 4, green / 4, blue / 4));
+            }
+        }
+        JavaI420Buffer buffer = JavaI420Buffer.wrap(width, height, y, width, u, chromaWidth, v, chromaWidth, new Runnable() {
+            @Override
+            public void run() {
+            }
+        });
+        return new VideoFrame(buffer, 0, System.nanoTime());
+    }
+
+    private static int rgbToY(int red, int green, int blue) {
+        return clamp(((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16);
+    }
+
+    private static int rgbToU(int red, int green, int blue) {
+        return clamp(((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128);
+    }
+
+    private static int rgbToV(int red, int green, int blue) {
+        return clamp(((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128);
+    }
+
+    private static int clamp(int value) {
+        return Math.max(0, Math.min(255, value));
     }
 
     private void sendState(String sessionId, String state, String candidateType, String error) {
@@ -470,7 +487,8 @@ final class AndroidRtcManager {
         final AtomicBoolean senderStarted = new AtomicBoolean(false);
         PeerConnection pc;
         DataChannel controlChannel;
-        DataChannel frameChannel;
+        VideoSource videoSource;
+        VideoTrack videoTrack;
         volatile long fastUntil;
         volatile String selectedCandidateType = "unknown";
         volatile long bytesSent;
@@ -545,8 +563,6 @@ final class AndroidRtcManager {
             String label = channel.label();
             if ("control".equals(label)) {
                 attachControlChannel(this, channel);
-            } else if ("frames".equals(label)) {
-                attachFrameChannel(this, channel);
             }
         }
 
