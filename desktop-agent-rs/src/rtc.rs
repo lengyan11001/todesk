@@ -154,7 +154,6 @@ impl RtcManager {
             "screen".to_string(),
             "bhzn".to_string(),
         ));
-        let _ = pc.add_track(Arc::clone(&video_track) as Arc<dyn webrtc::track::track_local::TrackLocal + Send + Sync>).await?;
         let session = Arc::new(RtcSession {
             session_id: session_id.to_string(),
             pc,
@@ -223,6 +222,14 @@ impl RtcManager {
 
     async fn apply_offer(self: &Arc<Self>, session: Arc<RtcSession>, sdp: String) -> Result<()> {
         session.pc.set_remote_description(RTCSessionDescription::offer(sdp)?).await?;
+        // Attach the video track only after the remote offer is known.  Adding
+        // it before set_remote_description creates a second video m-line, which
+        // browsers do not consume; that made every RTC session fall back to the
+        // JPEG relay after the first-frame timeout.
+        let _ = session
+            .pc
+            .add_track(Arc::clone(&session.video_track) as Arc<dyn webrtc::track::track_local::TrackLocal + Send + Sync>)
+            .await?;
         let answer = session.pc.create_answer(None).await?;
         session.pc.set_local_description(answer).await?;
         let local = session.pc.local_description().await.context("missing local description")?;
