@@ -21,7 +21,7 @@ impl CaptureOptions {
 
     fn for_fast_input(self) -> Self {
         Self {
-            max_side: self.max_side.min(1280),
+            max_side: self.max_side.min(1920),
             jpeg_quality: self.jpeg_quality.saturating_sub(10).max(30),
         }
     }

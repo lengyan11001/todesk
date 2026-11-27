@@ -111,10 +111,10 @@ impl QualityProfile {
     pub fn balanced() -> Self {
         Self {
             profile: Some("balanced".to_string()),
-            max_side: Some(1600),
+            max_side: Some(2560),
             fps: Some(24),
-            jpeg_quality: Some(62),
-            bitrate_kbps: Some(3000),
+            jpeg_quality: Some(66),
+            bitrate_kbps: Some(6000),
         }
     }
 

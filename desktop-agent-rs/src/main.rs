@@ -27,7 +27,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const AGENT_VERSION: &str = "0.2.11-rs";
+const AGENT_VERSION: &str = "0.2.12-rs";
 const FRAME_INTERVAL_FAST: Duration = Duration::from_millis(25);
 const FRAME_INTERVAL_NO_RELAY: Duration = Duration::from_millis(250);
 const FAST_FRAME_MS: u64 = 900;
@@ -58,7 +58,7 @@ async fn run_main(args: Vec<String>) -> Result<()> {
     let config = AgentConfig::load(config_path.as_deref())?;
     log::init(&config);
     if !no_update {
-        update::spawn_auto_update(config.clone(), AGENT_VERSION);
+        update::spawn_auto_update(config.clone(), AGENT_VERSION, args.clone());
     }
     if show_id {
         println!("BHZN ToDesk Rust Agent {}", AGENT_VERSION);
@@ -123,7 +123,7 @@ async fn handle_maintenance_args(args: &[String]) -> Result<bool> {
         let config_path = arg_value(args, "--config");
         let config = AgentConfig::load(config_path.as_deref())?;
         log::init(&config);
-        update::check_and_apply(&config, AGENT_VERSION, true).await?;
+        update::check_and_apply(&config, AGENT_VERSION, true, &args).await?;
         return Ok(true);
     }
     Ok(false)

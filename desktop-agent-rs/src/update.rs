@@ -14,12 +14,12 @@ struct UpdateManifest {
     sha256: String,
 }
 
-pub fn spawn_auto_update(config: AgentConfig, current_version: &'static str) {
+pub fn spawn_auto_update(config: AgentConfig, current_version: &'static str, args: Vec<String>) {
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(20));
         match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => {
-                if let Err(error) = runtime.block_on(check_and_apply(&config, current_version, false)) {
+                if let Err(error) = runtime.block_on(check_and_apply(&config, current_version, false, &args)) {
                     log::warn(format!("auto update failed: {error:#}"));
                 }
             }
@@ -28,7 +28,7 @@ pub fn spawn_auto_update(config: AgentConfig, current_version: &'static str) {
     });
 }
 
-pub async fn check_and_apply(config: &AgentConfig, current_version: &str, verbose: bool) -> Result<()> {
+pub async fn check_and_apply(config: &AgentConfig, current_version: &str, verbose: bool, args: &[String]) -> Result<()> {
     let manifest_url = format!("{}/api/releases/windows-agent", config.server.trim_end_matches('/'));
     let manifest = reqwest::get(&manifest_url).await?.error_for_status()?.json::<UpdateManifest>().await?;
     if !is_newer(&manifest.version, current_version) {
@@ -46,7 +46,7 @@ pub async fn check_and_apply(config: &AgentConfig, current_version: &str, verbos
     let current_exe = std::env::current_exe()?.canonicalize()?;
     let update_path = current_exe.with_extension("exe.update");
     fs::write(&update_path, &bytes).with_context(|| format!("write {}", update_path.display()))?;
-    schedule_replace(&current_exe, &update_path)?;
+    schedule_replace(&current_exe, &update_path, args)?;
     if verbose {
         println!("Update downloaded. Agent will restart.");
     }
@@ -66,21 +66,47 @@ fn version_tuple(value: &str) -> Vec<u32> {
         .collect()
 }
 
-fn schedule_replace(current_exe: &PathBuf, update_path: &PathBuf) -> Result<()> {
+fn schedule_replace(current_exe: &PathBuf, update_path: &PathBuf, args: &[String]) -> Result<()> {
     let script = current_exe.with_extension("update.cmd");
+    let mut restart = format!("\"{}\"", current_exe.display());
+    let mut has_no_auto_install = false;
+    for arg in args {
+        if arg == "--check-update" || arg == "--no-update" {
+            continue;
+        }
+        if arg == "--no-auto-install" {
+            has_no_auto_install = true;
+        }
+        restart.push(' ');
+        restart.push_str(&quote_arg(arg));
+    }
+    if !has_no_auto_install {
+        restart.push_str(" --no-auto-install");
+    }
     let body = format!(
         "@echo off\r\n\
          timeout /t 2 /nobreak >nul\r\n\
          copy /y \"{}\" \"{}\" >nul\r\n\
          del \"{}\" >nul 2>nul\r\n\
-         start \"\" \"{}\" --no-auto-install\r\n\
+         start \"\" {}\r\n\
          del \"%~f0\" >nul 2>nul\r\n",
         update_path.display(),
         current_exe.display(),
         update_path.display(),
-        current_exe.display()
+        restart
     );
     fs::write(&script, body)?;
     Command::new("cmd").args(["/C", "start", "", &script.display().to_string()]).spawn()?;
     Ok(())
+}
+
+fn quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "\"\"".to_string();
+    }
+    if arg.contains(' ') || arg.contains('\t') || arg.contains('"') {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    } else {
+        arg.to_string()
+    }
 }
