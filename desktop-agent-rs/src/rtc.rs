@@ -380,6 +380,7 @@ impl RtcManager {
             let normal_delay = frame_delay(session.quality.fps_value());
             let mut next_frame = tokio::time::Instant::now();
             let mut last_report = tokio::time::Instant::now();
+            let mut last_intra = tokio::time::Instant::now() - Duration::from_secs(5);
             let api = openh264::OpenH264API::from_source();
             let mut encoder = match Encoder::with_api_config(
                 api,
@@ -387,7 +388,7 @@ impl RtcManager {
                     .usage_type(UsageType::ScreenContentRealTime)
                     .bitrate(BitRate::from_bps(session.quality.bitrate_kbps_value().saturating_mul(1000)))
                     .max_frame_rate(FrameRate::from_hz(session.quality.fps_value() as f32))
-                    .skip_frames(true)
+                    .skip_frames(false)
                     .complexity(Complexity::Low)
                     .num_threads(4),
             ) {
@@ -440,6 +441,10 @@ impl RtcManager {
                         session.frames_captured.fetch_add(1, Ordering::Relaxed);
                         let source = BgraSliceU8::new(&frame.bgra, (frame.width as usize, frame.height as usize));
                         let yuv = YUVBuffer::from_bgra8_source(source);
+                        if last_intra.elapsed() >= Duration::from_secs(2) {
+                            last_intra = tokio::time::Instant::now();
+                            encoder.force_intra_frame();
+                        }
                         let encoded = match encoder.encode(&yuv) {
                             Ok(value) => Some(value.to_vec()),
                             Err(error) => {
