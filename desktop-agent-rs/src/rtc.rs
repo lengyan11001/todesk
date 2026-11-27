@@ -57,6 +57,11 @@ struct RtcSession {
     video_started: AtomicBool,
     quality: QualityProfile,
     fast_until: AtomicU64,
+    frames_captured: AtomicU64,
+    frames_encoded: AtomicU64,
+    bytes_written: AtomicU64,
+    write_errors: AtomicU64,
+    last_error: Mutex<String>,
 }
 
 impl RtcManager {
@@ -165,6 +170,11 @@ impl RtcManager {
             video_started: AtomicBool::new(false),
             quality,
             fast_until: AtomicU64::new(0),
+            frames_captured: AtomicU64::new(0),
+            frames_encoded: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
+            write_errors: AtomicU64::new(0),
+            last_error: Mutex::new(String::new()),
         });
 
         let manager = Arc::clone(self);
@@ -225,10 +235,31 @@ impl RtcManager {
 
     async fn apply_offer(self: &Arc<Self>, session: Arc<RtcSession>, sdp: String) -> Result<()> {
         session.pc.set_remote_description(RTCSessionDescription::offer(sdp)?).await?;
+        let mut tx_info = String::new();
+        let mut video_tx: Option<Arc<webrtc::rtp_transceiver::RTCRtpTransceiver>> = None;
+        for transceiver in session.pc.get_transceivers().await {
+            let mid = transceiver.mid().map(|value| value.to_string()).unwrap_or_default();
+            let has_track = transceiver.sender().await.track().await.is_some();
+            tx_info.push_str(&format!(
+                "mid={mid},kind={:?},dir={:?},track={has_track};",
+                transceiver.kind(),
+                transceiver.direction()
+            ));
+            if transceiver.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video && video_tx.is_none() {
+                video_tx = Some(transceiver);
+            }
+        }
+        if let Some(transceiver) = video_tx {
+            transceiver
+                .set_direction(webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection::Sendonly)
+                .await;
+            tx_info.push_str("sendonly_applied;");
+        }
         let answer = session.pc.create_answer(None).await?;
         let merged_sdp = merge_answer_video_sdp(&answer.sdp);
         let answer = RTCSessionDescription::answer(merged_sdp.clone())?;
         session.pc.set_local_description(answer).await?;
+        self.send_state(&session.session_id, "negotiated", "unknown", &tx_info);
         self.out_tx
             .send(RtcOutbound::Json(ClientEvent::RtcAnswer(RtcSdp {
                 session_id: session.session_id.clone(),
@@ -348,8 +379,10 @@ impl RtcManager {
             let capture_options = CaptureOptions::from_quality(&session.quality);
             let normal_delay = frame_delay(session.quality.fps_value());
             let mut next_frame = tokio::time::Instant::now();
+            let mut last_report = tokio::time::Instant::now();
+            let api = openh264::OpenH264API::from_source();
             let mut encoder = match Encoder::with_api_config(
-                openh264::OpenH264API::from_source(),
+                api,
                 EncoderConfig::new()
                     .usage_type(UsageType::ScreenContentRealTime)
                     .bitrate(BitRate::from_bps(session.quality.bitrate_kbps_value().saturating_mul(1000)))
@@ -361,8 +394,26 @@ impl RtcManager {
                 Ok(value) => value,
                 Err(error) => {
                     log::warn(format!("rtc video encoder init failed session={}: {error}", session.session_id));
-                    manager.close_session(&session.session_id).await;
-                    return;
+                    match Encoder::with_api_config(openh264::OpenH264API::from_source(), EncoderConfig::new()) {
+                        Ok(value) => value,
+                        Err(second) => {
+                            log::warn(format!("rtc video encoder fallback failed session={}: {second}", session.session_id));
+                            let _ = manager.out_tx.send(RtcOutbound::Json(ClientEvent::RtcState(RtcState {
+                                session_id: session.session_id.clone(),
+                                device_id: manager.device_id.clone(),
+                                state: "encoder_failed".to_string(),
+                                selected_candidate_type: "unknown".to_string(),
+                                rtt_ms: 0,
+                                bitrate_kbps: 0,
+                                bytes_sent: 0,
+                                bytes_received: 0,
+                                packets_lost: 0,
+                                error: format!("{error}; fallback={second}").chars().take(400).collect(),
+                            })));
+                            manager.close_session(&session.session_id).await;
+                            return;
+                        }
+                    }
                 }
             };
             log::info(format!(
@@ -386,29 +437,55 @@ impl RtcManager {
                 };
                 match frame {
                     Ok(frame) => {
+                        session.frames_captured.fetch_add(1, Ordering::Relaxed);
                         let source = BgraSliceU8::new(&frame.bgra, (frame.width as usize, frame.height as usize));
                         let yuv = YUVBuffer::from_bgra8_source(source);
                         let encoded = match encoder.encode(&yuv) {
                             Ok(value) => Some(value.to_vec()),
                             Err(error) => {
                                 log::warn(format!("rtc video encode failed session={}: {error}", session.session_id));
+                                { *session.last_error.lock() = format!("encode: {error}"); }
                                 None
                             }
                         };
                         if let Some(encoded) = encoded {
+                            session.frames_encoded.fetch_add(1, Ordering::Relaxed);
                             if session.pc.connection_state() == RTCPeerConnectionState::Connected {
                                 let sample = webrtc::media::Sample {
                                     data: Bytes::from(encoded),
                                     duration: Duration::from_millis((1000 / session.quality.fps_value().max(1)) as u64),
                                     ..Default::default()
                                 };
-                                if let Err(error) = session.video_track.write_sample(&sample).await {
-                                    log::warn(format!("rtc video sample failed session={}: {error:#}", session.session_id));
+                                match session.video_track.write_sample(&sample).await {
+                                    Ok(()) => {
+                                        session.bytes_written.fetch_add(sample.data.len() as u64, Ordering::Relaxed);
+                                    }
+                                    Err(error) => {
+                                        session.write_errors.fetch_add(1, Ordering::Relaxed);
+                                        { *session.last_error.lock() = format!("write: {error:#}"); }
+                                        log::warn(format!("rtc video sample failed session={}: {error:#}", session.session_id));
+                                    }
                                 }
                             }
                         }
                     }
-                    Err(error) => log::warn(format!("rtc capture failed session={}: {error:#}", session.session_id)),
+                    Err(error) => {
+                        { *session.last_error.lock() = format!("capture: {error:#}"); }
+                        log::warn(format!("rtc capture failed session={}: {error:#}", session.session_id));
+                    }
+                }
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    last_report = tokio::time::Instant::now();
+                    let detail = format!(
+                        "cap={},enc={},wr_bytes={},wr_err={},pcerr={},err={}",
+                        session.frames_captured.load(Ordering::Relaxed),
+                        session.frames_encoded.load(Ordering::Relaxed),
+                        session.bytes_written.load(Ordering::Relaxed),
+                        session.write_errors.load(Ordering::Relaxed),
+                        session.pc.connection_state() as i32,
+                        session.last_error.lock().chars().take(120).collect::<String>()
+                    );
+                    manager.send_state(&session.session_id, "media", "unknown", &detail);
                 }
                 next_frame += interval;
                 let now = tokio::time::Instant::now();
